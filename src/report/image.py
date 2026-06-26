@@ -7,6 +7,8 @@ from typing import Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
+from src.report.verdict import get_verdict
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 FONT_REG = PROJECT_ROOT / "fonts" / "NotoSansSC-Regular.otf"
 FONT_BOLD = PROJECT_ROOT / "fonts" / "NotoSansSC-Bold.otf"
@@ -123,6 +125,8 @@ def _estimate_card_height(r: dict) -> int:
         risks.append("placeholder")
     if risks:
         h += 6 + 22 + 19 * min(len(risks), 3)
+    # 大白话判决块:固定 ~70px (26pt 字 + padding)
+    h += 16 + 26 + 28 + 4
     h += CARD_PAD  # 底部 padding
     return h
 
@@ -293,6 +297,24 @@ def _draw_card(img: Image.Image, x: int, y: int, r: dict, card_height: int) -> N
             draw.text((inner_x + 8, cur_y), "•", font=_font(13), fill="#f59e0b")
             draw.text((inner_x + 24, cur_y), risk, font=_font(13), fill=TEXT_DIM)
             cur_y += 19
+
+    # 8. 大白话判决(最显眼)
+    verdict = get_verdict(rec, r["code"])
+    cur_y += 16
+    # 背景色块(用 recommendation 的暗色背景)
+    box_left = inner_x - 4
+    box_right = x + CARD_W - CARD_PAD
+    f_verdict = _font(26, bold=True)
+    vw, vh = _text_size(draw, verdict, f_verdict)
+    box_h = vh + 28
+    draw.rounded_rectangle(
+        (box_left, cur_y, box_right, cur_y + box_h),
+        radius=12, fill=rec_bg, outline=rec_color, width=1,
+    )
+    # 居中
+    text_x = box_left + (box_right - box_left - vw) // 2
+    draw.text((text_x, cur_y + 14), verdict, font=f_verdict, fill=rec_color)
+    cur_y += box_h + 4
 
 
 def _wrap_text(

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import date
 
+from src.report.verdict import get_verdict
+
 REC_INFO = {
     "strong_buy": ("🟢", "强烈加仓"),
     "buy":        ("🟢", "可加仓"),
@@ -95,6 +97,11 @@ def _fmt_fund_block(r: dict, rank: int) -> str:
         for risk in risks:
             lines.append(f"- {risk}")
         lines.append("")
+
+    # 大白话判决(最后压轴)
+    verdict = get_verdict(r["recommendation"], r["code"])
+    lines.append(f"## 💬 {verdict}")
+    lines.append("")
 
     return "\n".join(lines).rstrip()
 
