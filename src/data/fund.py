@@ -47,19 +47,38 @@ def fetch_fund_nav_history(code: str) -> pd.DataFrame:
     return df[["trade_date", "unit_nav", "acc_nav", "daily_pct"]].dropna(subset=["unit_nav"])
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
 def fetch_fund_holdings(code: str, year: int | None = None) -> pd.DataFrame:
     """抓取基金前十大重仓股(最新季报)
     返回列:report_date, stock_code, stock_name, pct
+    注:这个接口有时不稳定,失败时返回空 DataFrame,不阻塞主流程。
+    对 QDII 基金来说持仓非必需,事件分析用市场结构化数据。
     """
+    import signal
+
+    def handler(signum, frame):
+        raise TimeoutError("fetch_fund_holdings timeout")
+
     logger.info(f"[fund] 抓取持仓 {code}")
     if year is None:
         year = date.today().year
 
+    # 给整个抓取设 60 秒硬超时
+    old = signal.signal(signal.SIGALRM, handler) if hasattr(signal, "SIGALRM") else None
+    if hasattr(signal, "SIGALRM"):
+        signal.alarm(60)
     try:
-        df = ak.fund_portfolio_hold_em(symbol=code, date=str(year))
-    except Exception:
-        df = ak.fund_portfolio_hold_em(symbol=code, date=str(year - 1))
+        try:
+            df = ak.fund_portfolio_hold_em(symbol=code, date=str(year))
+        except Exception:
+            df = ak.fund_portfolio_hold_em(symbol=code, date=str(year - 1))
+    except Exception as e:
+        logger.warning(f"[fund] 持仓抓取失败 {code}: {e},跳过")
+        return pd.DataFrame(columns=["report_date", "stock_code", "stock_name", "pct"])
+    finally:
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            if old is not None:
+                signal.signal(signal.SIGALRM, old)
 
     if df is None or df.empty:
         return pd.DataFrame(columns=["report_date", "stock_code", "stock_name", "pct"])
