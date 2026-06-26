@@ -1,0 +1,58 @@
+# ============================================================
+# 基金趋势监控 - 配置文件
+# 复制为 config.yaml 并填入你的配置
+# ============================================================
+
+# 监控的基金列表(建议 5 只以内)
+funds:
+  - code: "005827"
+    name: "易方达蓝筹精选"
+    type: domestic_active        # 国内主动基金
+
+  - code: "040046"
+    name: "华夏纳指ETF联接"
+    type: qdii_index             # 纳指 QDII(场外)
+
+  - code: "161725"
+    name: "招商中证白酒"
+    type: domestic_index         # 国内指数基金
+
+# 基金类型说明:
+#   domestic_active  - 国内主动基金(用持仓股 PE 算估值)
+#   domestic_index   - 国内指数基金(用跟踪指数 PE 分位)
+#   qdii_index       - 纳指等海外 QDII(用美股指数 + 汇率因子)
+
+# 打分权重(总和 = 1.0)
+scoring:
+  weights:
+    technical: 0.4               # 技术面
+    valuation: 0.3               # 估值面
+    event: 0.3                   # 事件面(LLM 分析新闻)
+  thresholds:
+    strong_buy: 85               # 强烈加仓
+    buy: 70                      # 可加仓
+    neutral: 50                  # 小幅加仓 / 定投
+    avoid: 30                    # 观望
+
+# LLM / 推送的 KEY 走 .env(DEEPSEEK_API_KEY / SERVERCHAN_KEY),
+# 此处可只配置非敏感的参数(可选,有默认值)。
+llm:
+  provider: deepseek
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"
+# push 段不再需要,SendKey 从 .env 读
+
+# 调度时间(本地时区 Asia/Shanghai)
+schedule:
+  daily_time: "08:00"            # 工作日日报
+  weekly_time: "17:00"           # 周五周报
+  weekly_day: "friday"
+
+# 数据库
+database:
+  path: "data/fund_trends.db"
+
+# 日志
+logging:
+  level: INFO
+  path: "logs/fund_trends.log"
