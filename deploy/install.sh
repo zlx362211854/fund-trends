@@ -104,9 +104,8 @@ else
 fi
 
 cat >> "$TMP_CRON" <<EOF
-$CRON_TAG
-$DAILY_CRON  cd $PROJECT_DIR && $PROJECT_DIR/.venv/bin/python scripts/run_daily.py  >> $PROJECT_DIR/logs/cron.log 2>&1
-$WEEKLY_CRON cd $PROJECT_DIR && $PROJECT_DIR/.venv/bin/python scripts/run_weekly.py >> $PROJECT_DIR/logs/cron.log 2>&1
+$DAILY_CRON  cd $PROJECT_DIR && $PROJECT_DIR/.venv/bin/python scripts/run_daily.py  >> $PROJECT_DIR/logs/cron.log 2>&1 $CRON_TAG
+$WEEKLY_CRON cd $PROJECT_DIR && $PROJECT_DIR/.venv/bin/python scripts/run_weekly.py >> $PROJECT_DIR/logs/cron.log 2>&1 $CRON_TAG
 EOF
 
 crontab "$TMP_CRON"
@@ -114,7 +113,7 @@ rm "$TMP_CRON"
 mkdir -p logs
 
 echo "    已安装 cron:"
-crontab -l | grep -A 2 "$CRON_TAG"
+crontab -l | grep "$CRON_TAG"
 
 echo ""
 echo "============================================"
