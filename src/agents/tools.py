@@ -22,6 +22,10 @@ from src.data.fund import (
     save_holdings,
     save_nav,
 )
+from src.data.index_valuation import (
+    fetch_ndx_forward_pe,
+    refresh_index_valuation,
+)
 from src.data.market import (
     fetch_index_a,
     fetch_nasdaq,
@@ -125,6 +129,22 @@ def tool_refresh_news(cfg: Config, limit: int = 100) -> dict:
             cfg.db_path, "news", "market", False, error=str(exc)
         )
         raise
+
+
+def tool_refresh_valuation_data(cfg: Config, provider=None) -> dict:
+    """Refresh each required benchmark valuation at most once per day."""
+    required = {"NDX" for fund in cfg.funds if fund.type == "qdii_index"}
+    out: dict[str, Any] = {}
+    for benchmark_code in sorted(required):
+        snapshot = refresh_index_valuation(
+            cfg.db_path,
+            benchmark_code,
+            provider=provider or fetch_ndx_forward_pe,
+            max_age_days=cfg.scoring.max_valuation_age_days,
+            min_samples=cfg.scoring.min_valuation_samples,
+        )
+        out[benchmark_code] = asdict(snapshot)
+    return out
 
 
 # ============ Analysis Agent tools ============

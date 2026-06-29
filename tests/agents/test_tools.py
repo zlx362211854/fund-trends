@@ -2,7 +2,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from src.agents.tools import tool_score_fund
+from src.agents.tools import tool_refresh_valuation_data, tool_score_fund
 from src.config import (
     Config,
     FundConfig,
@@ -73,4 +73,32 @@ def test_score_fund_marks_missing_event_as_degraded(tmp_path, monkeypatch):
     assert result["quality"]["status"] == "degraded"
     assert result["observation_level"] is not None
     assert "event" not in result["observation"]["used_dimensions"]
-    assert result["scoring_version"] == "observation-v1"
+    assert result["scoring_version"] == cfg.scoring.version
+
+
+def test_valuation_refresh_is_shared_by_qdii_funds(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.funds = [
+        FundConfig("000001", "QDII A", "qdii_index"),
+        FundConfig("000002", "QDII B", "qdii_index"),
+    ]
+    init_db(cfg.db_path)
+    calls: list[int] = []
+    history = [
+        {"date": f"{year}-{month:02d}-28", "value": 18 + month / 10}
+        for year in range(2021, 2026)
+        for month in range(1, 13)
+    ]
+
+    def provider():
+        calls.append(1)
+        return {
+            "updated": date.today().isoformat(),
+            "current": {"forward": 24.0},
+            "forward": history,
+        }
+
+    result = tool_refresh_valuation_data(cfg, provider=provider)
+
+    assert calls == [1]
+    assert result["NDX"]["available"] is True

@@ -12,6 +12,7 @@ from src.agents.tools import (
     tool_refresh_fund_data,
     tool_refresh_market_data,
     tool_refresh_news,
+    tool_refresh_valuation_data,
     tool_score_fund,
 )
 
@@ -19,7 +20,7 @@ from src.agents.tools import (
 def run_data_agent(cfg: Config) -> dict:
     """Data Agent:刷新所有数据"""
     logger.info("=== Data Agent ===")
-    out = {"funds": {}, "market": {}, "news": {}}
+    out = {"funds": {}, "market": {}, "valuation": {}, "news": {}}
 
     for fund in cfg.funds:
         try:
@@ -29,6 +30,7 @@ def run_data_agent(cfg: Config) -> dict:
             out["funds"][fund.code] = {"error": str(e)}
 
     out["market"] = tool_refresh_market_data(cfg)
+    out["valuation"] = tool_refresh_valuation_data(cfg)
     try:
         out["news"] = tool_refresh_news(cfg)
     except Exception as exc:

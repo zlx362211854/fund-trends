@@ -14,6 +14,7 @@ def record_source_attempt(
     row_count: int = 0,
     latest_data_date: str | None = None,
     error: str | None = None,
+    attempted_at: str | None = None,
 ) -> None:
     with get_conn(db_path) as conn:
         conn.execute(
@@ -21,13 +22,13 @@ def record_source_attempt(
             INSERT INTO data_source_status(
                 source, subject, last_attempt_at, last_success_at,
                 row_count, latest_data_date, last_error
-            ) VALUES (?, ?, CURRENT_TIMESTAMP,
-                      CASE WHEN ? THEN CURRENT_TIMESTAMP END,
+            ) VALUES (?, ?, COALESCE(?, CURRENT_TIMESTAMP),
+                      CASE WHEN ? THEN COALESCE(?, CURRENT_TIMESTAMP) END,
                       ?, ?, ?)
             ON CONFLICT(source, subject) DO UPDATE SET
-                last_attempt_at = CURRENT_TIMESTAMP,
+                last_attempt_at = excluded.last_attempt_at,
                 last_success_at = CASE
-                    WHEN ? THEN CURRENT_TIMESTAMP
+                    WHEN ? THEN excluded.last_success_at
                     ELSE data_source_status.last_success_at
                 END,
                 row_count = CASE
@@ -43,7 +44,9 @@ def record_source_attempt(
             (
                 source,
                 subject,
+                attempted_at,
                 success,
+                attempted_at,
                 row_count,
                 latest_data_date,
                 error,
