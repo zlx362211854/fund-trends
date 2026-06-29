@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from io import StringIO
 from pathlib import Path
 
 import akshare as ak
+import httpx
 import pandas as pd
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -26,14 +28,37 @@ def fetch_nasdaq() -> pd.DataFrame:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
 def fetch_usdcny() -> pd.DataFrame:
-    """美元兑人民币汇率"""
-    logger.info("[market] 抓取 USD/CNY")
-    df = ak.currency_boc_sina(symbol="美元")
-    df = df.rename(columns={"日期": "trade_date", "中行汇买价": "close"})
-    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
-    df["close"] = pd.to_numeric(df["close"], errors="coerce") / 100  # 中行报价 100 单位
-    df["daily_pct"] = df["close"].pct_change() * 100
-    return df[["trade_date", "close", "daily_pct"]].dropna(subset=["close"])
+    """USD/CNY derived from official ECB EUR reference rates."""
+    logger.info("[market] 抓取 ECB USD/CNY")
+    start = (date.today() - timedelta(days=1460)).isoformat()
+    response = httpx.get(
+        "https://data-api.ecb.europa.eu/service/data/EXR/D.USD+CNY.EUR.SP00.A",
+        params={"startPeriod": start, "format": "csvdata"},
+        headers={"User-Agent": "fund-trends/observation-v2 (+research use)"},
+        timeout=20.0,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    raw = pd.read_csv(StringIO(response.text))
+    required = {"CURRENCY", "TIME_PERIOD", "OBS_VALUE"}
+    if not required.issubset(raw.columns):
+        raise ValueError("ECB exchange-rate response is missing required columns")
+    raw = raw[raw["CURRENCY"].isin(["USD", "CNY"])].copy()
+    raw["OBS_VALUE"] = pd.to_numeric(raw["OBS_VALUE"], errors="coerce")
+    pivot = raw.pivot_table(
+        index="TIME_PERIOD", columns="CURRENCY", values="OBS_VALUE", aggfunc="last"
+    ).dropna(subset=["USD", "CNY"])
+    pivot = pivot[(pivot["USD"] > 0) & (pivot["CNY"] > 0)]
+    if pivot.empty:
+        raise ValueError("ECB exchange-rate response has no aligned USD/CNY rows")
+    result = pivot.reset_index().rename(columns={"TIME_PERIOD": "trade_date"})
+    result["trade_date"] = pd.to_datetime(result["trade_date"]).dt.strftime(
+        "%Y-%m-%d"
+    )
+    result["close"] = result["CNY"] / result["USD"]
+    result = result.sort_values("trade_date")
+    result["daily_pct"] = result["close"].pct_change() * 100
+    return result[["trade_date", "close", "daily_pct"]]
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))

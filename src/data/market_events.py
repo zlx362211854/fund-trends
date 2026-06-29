@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -28,11 +29,26 @@ def _pct_tone(pct: float, threshold: float = 0.5) -> str:
     return "neutral"
 
 
-def _quantile_tone(q: float) -> str:
-    # q 是当前在历史中的分位(0-1),高分位 = 估值贵 = 偏 bearish
-    if q >= 0.8:
+def _trend_metrics(values: pd.Series) -> tuple[float, float, float]:
+    ma60 = float(values.rolling(60).mean().iloc[-1])
+    ma200 = values.rolling(200).mean()
+    distance = float(values.iloc[-1]) / ma60 - 1 if ma60 else 0.0
+    slope = (
+        float(ma200.iloc[-1]) / float(ma200.iloc[-21]) - 1
+        if len(values) >= 220 and float(ma200.iloc[-21])
+        else 0.0
+    )
+    expected_move = max(
+        0.02,
+        float(values.pct_change().iloc[-60:].std(ddof=0)) * math.sqrt(60),
+    )
+    return distance, distance / expected_move, slope
+
+
+def _deviation_tone(deviation_z: float) -> str:
+    if deviation_z >= 2.0:
         return "bearish"
-    if q <= 0.2:
+    if deviation_z <= -2.0:
         return "bullish"
     return "neutral"
 
@@ -60,31 +76,34 @@ def build_market_events(db_path: str | Path, fund_type: FundType) -> list[Market
                 value=f"{cum:+.2f}%",
                 tone=_pct_tone(cum, 2.0),
             ))
-            # 近1年分位
-            ndx_1y = ndx["close"].iloc[-min(250, len(ndx)):]
-            q = (ndx_1y <= ndx_1y.iloc[-1]).mean()
-            events.append(MarketEvent(
-                label="纳指 1 年分位",
-                value=f"{q*100:.0f}%",
-                tone=_quantile_tone(q),
-                detail="分位越高 = 越接近 1 年高点",
-            ))
+            if len(ndx) >= 220:
+                distance, deviation_z, slope = _trend_metrics(ndx["close"])
+                events.append(MarketEvent(
+                    label="纳指趋势偏离",
+                    value=f"距MA60 {distance*100:+.2f}%  标准化 {deviation_z:+.2f}",
+                    tone=_deviation_tone(deviation_z),
+                    detail=f"MA200 20日斜率 {slope*100:+.2f}%",
+                ))
 
         # 2. 美元兑人民币
         fx = load_market(db_path, "USDCNY", days=400)
         if not fx.empty and len(fx) >= 2:
             last = fx.iloc[-1]
             pct = float(last["daily_pct"]) if pd.notna(last["daily_pct"]) else 0.0
-            # 对买 QDII 来说:汇率上升(人民币贬值)= 持有 QDII 的人民币计价收益偏利好
-            # 但同时:汇率高位入场可能面临汇率回调
-            fx_1y = fx["close"].iloc[-min(250, len(fx)):]
-            q = (fx_1y <= last["close"]).mean()
-            tone = "bearish" if q >= 0.8 else ("bullish" if q <= 0.2 else "neutral")
+            detail = f"日期 {last['trade_date']}"
+            tone = _pct_tone(pct, 0.5)
+            if len(fx) >= 220:
+                distance, deviation_z, slope = _trend_metrics(fx["close"])
+                tone = _deviation_tone(deviation_z)
+                detail = (
+                    f"距MA60 {distance*100:+.2f}%  标准化 {deviation_z:+.2f}  "
+                    f"MA200 20日斜率 {slope*100:+.2f}%"
+                )
             events.append(MarketEvent(
-                label="USD/CNY",
+                label="USD/CNY趋势偏离",
                 value=f"{last['close']:.4f}  日变 {pct:+.2f}%",
                 tone=tone,
-                detail=f"1 年分位 {q*100:.0f}%(高位入场不利)",
+                detail=detail,
             ))
 
         return events
@@ -100,13 +119,14 @@ def build_market_events(db_path: str | Path, fund_type: FundType) -> list[Market
             tone=_pct_tone(pct, 0.5),
             detail=f"日期 {last['trade_date']}",
         ))
-        idx_1y = idx["close"].iloc[-min(250, len(idx)):]
-        q = (idx_1y <= last["close"]).mean()
-        events.append(MarketEvent(
-            label="沪深 300 一年分位",
-            value=f"{q*100:.0f}%",
-            tone=_quantile_tone(q),
-        ))
+        if len(idx) >= 220:
+            distance, deviation_z, slope = _trend_metrics(idx["close"])
+            events.append(MarketEvent(
+                label="沪深300趋势偏离",
+                value=f"距MA60 {distance*100:+.2f}%  标准化 {deviation_z:+.2f}",
+                tone=_deviation_tone(deviation_z),
+                detail=f"MA200 20日斜率 {slope*100:+.2f}%",
+            ))
 
     return events
 

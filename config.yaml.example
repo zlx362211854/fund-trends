@@ -18,22 +18,25 @@ funds:
     type: domestic_index         # 国内指数基金
 
 # 基金类型说明:
-#   domestic_active  - 国内主动基金(当前使用净值分位代理)
-#   domestic_index   - 国内指数基金(当前使用跟踪指数价格分位代理)
-#   qdii_index       - 纳指等海外 QDII(指数价格分位 + 汇率因子)
+#   domestic_active  - 国内主动基金(当前仅提供时机分)
+#   domestic_index   - 国内指数基金(无真实估值时长期分暂不可评估)
+#   qdii_index       - 纳斯达克100 QDII(人民币口径基准 + 前瞻PE)
 
-# 打分权重(总和 = 1.0)
+# 双周期评分；每组权重必须各自合计为 1.0
 scoring:
-  version: observation-v1          # 评分规则版本,改变公式时必须更新
-  weights:
-    technical: 0.4               # 技术面
-    valuation: 0.3               # 估值面
-    event: 0.3                   # 事件面(LLM 分析新闻)
-  thresholds:
-    strong_buy: 85               # 高关注
-    buy: 70                      # 较高关注
-    neutral: 50                  # 中性观察
-    avoid: 30                    # 谨慎观察
+  version: observation-v2
+  long_term_weights:
+    valuation: 0.40               # 真实指数估值
+    trend: 0.30                   # 长期趋势
+    risk: 0.20                    # 波动与回撤
+    tracking: 0.10                # 基金跟踪质量
+  timing_weights:
+    trend: 0.30                   # MA200趋势状态
+    deviation: 0.30               # 波动率标准化偏离
+    stabilization: 0.25           # 回撤后的企稳确认
+    temperature: 0.15             # RSI与短期变化
+  max_valuation_age_days: 7
+  min_valuation_samples: 60
 
 # 数据质量阈值(自然日,已覆盖周末和普通节假日)
 quality:
