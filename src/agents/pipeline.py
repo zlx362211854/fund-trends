@@ -7,6 +7,7 @@ from __future__ import annotations
 from loguru import logger
 
 from src.config import Config
+from src.evaluation.outcomes import update_mature_outcomes
 from src.agents.tools import (
     tool_refresh_fund_data,
     tool_refresh_market_data,
@@ -65,4 +66,10 @@ def run_analysis_agent(cfg: Config) -> list[dict]:
 def run_pipeline(cfg: Config) -> list[dict]:
     """Orchestrator:Data → Analysis"""
     run_data_agent(cfg)
-    return run_analysis_agent(cfg)
+    results = run_analysis_agent(cfg)
+    try:
+        updated = update_mature_outcomes(cfg)
+        logger.info(f"[outcome] 新增到期结果 {updated} 条")
+    except Exception as exc:
+        logger.error(f"[outcome] 结果评价失败,下次重试: {exc}")
+    return results
