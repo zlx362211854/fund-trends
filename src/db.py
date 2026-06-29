@@ -105,11 +105,45 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     PRIMARY KEY (code, signal_date, scoring_version, horizon_days)
 );
 
+-- 指数真实估值历史缓存
+CREATE TABLE IF NOT EXISTS index_valuations (
+    benchmark_code TEXT NOT NULL,
+    metric         TEXT NOT NULL,
+    data_date      TEXT NOT NULL,
+    value          REAL NOT NULL,
+    source         TEXT NOT NULL,
+    fetched_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (benchmark_code, metric, data_date)
+);
+
+-- observation-v2 两个评分维度的到期结果
+CREATE TABLE IF NOT EXISTS score_outcomes_v2 (
+    code                 TEXT NOT NULL,
+    signal_date          TEXT NOT NULL,
+    scoring_version      TEXT NOT NULL,
+    dimension            TEXT NOT NULL,
+    level                TEXT NOT NULL,
+    horizon_days         INTEGER NOT NULL,
+    start_date           TEXT,
+    end_date             TEXT NOT NULL,
+    fund_return_pct      REAL NOT NULL,
+    benchmark_return_pct REAL NOT NULL,
+    excess_return_pct    REAL NOT NULL,
+    beat_benchmark       INTEGER NOT NULL,
+    evaluated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (
+        code, signal_date, scoring_version, dimension, horizon_days
+    )
+);
+
 CREATE INDEX IF NOT EXISTS idx_nav_date ON fund_nav(trade_date);
 CREATE INDEX IF NOT EXISTS idx_market_date ON market_data(trade_date);
 CREATE INDEX IF NOT EXISTS idx_news_publish ON news_cache(publish_at);
 CREATE INDEX IF NOT EXISTS idx_scores_date ON daily_scores(score_date);
 CREATE INDEX IF NOT EXISTS idx_outcomes_signal ON signal_outcomes(signal_date);
+CREATE INDEX IF NOT EXISTS idx_valuations_date ON index_valuations(data_date);
+CREATE INDEX IF NOT EXISTS idx_outcomes_v2_signal
+    ON score_outcomes_v2(signal_date);
 """
 
 
@@ -118,6 +152,12 @@ DAILY_SCORE_COLUMNS = {
     "quality_status": "TEXT",
     "quality_json": "TEXT",
     "scoring_version": "TEXT",
+    "long_term_score": "REAL",
+    "long_term_level": "TEXT",
+    "long_term_json": "TEXT",
+    "timing_score": "REAL",
+    "timing_level": "TEXT",
+    "timing_json": "TEXT",
 }
 
 OUTCOME_COLUMNS = {

@@ -21,8 +21,19 @@ def test_init_db_is_idempotent_and_adds_observation_schema(tmp_path):
         "quality_status",
         "quality_json",
         "scoring_version",
+        "long_term_score",
+        "long_term_level",
+        "long_term_json",
+        "timing_score",
+        "timing_level",
+        "timing_json",
     } <= columns
-    assert {"data_source_status", "signal_outcomes"} <= tables
+    assert {
+        "data_source_status",
+        "signal_outcomes",
+        "index_valuations",
+        "score_outcomes_v2",
+    } <= tables
     with sqlite3.connect(path) as conn:
         outcome_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(signal_outcomes)")

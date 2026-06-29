@@ -6,7 +6,7 @@
 
 **Architecture:** Add a small valuation provider/cache boundary, two pure scoring modules, and a versioned result shape consumed by the existing pipeline and reports. Preserve `observation-v1` rows, keep LLM event analysis outside both numeric scores, and make each missing input explicit.
 
-**Tech Stack:** Python 3, pandas, numpy, requests, SQLite, Pillow, pytest
+**Tech Stack:** Python 3, pandas, numpy, httpx, SQLite, Pillow, pytest
 
 ---
 
