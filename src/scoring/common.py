@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pandas as pd
+
 
 @dataclass
 class HorizonScore:
@@ -27,3 +29,11 @@ def score_level(score: float) -> str:
     if score >= 20:
         return "below_average"
     return "weak"
+
+
+def value_series(frame: pd.DataFrame) -> pd.Series:
+    for column in ("unit_nav", "close", "value"):
+        if column in frame.columns:
+            values = pd.to_numeric(frame[column], errors="coerce").dropna()
+            return values.reset_index(drop=True)
+    return pd.Series(dtype=float)
