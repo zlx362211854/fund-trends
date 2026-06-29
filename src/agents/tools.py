@@ -37,7 +37,9 @@ from src.data.news import (
     load_recent_news,
     save_news,
 )
+from src.data.status import load_source_status, record_source_attempt
 from src.db import get_conn
+from src.quality import assess_quality, compose_observation
 from src.scoring.event import compute_event_score
 from src.scoring.technical import compute_technical_score
 from src.scoring.valuation import compute_valuation_score
@@ -47,10 +49,34 @@ from src.scoring.valuation import compute_valuation_score
 
 def tool_refresh_fund_data(cfg: Config, code: str) -> dict:
     """抓取并保存单只基金最新净值和持仓。"""
-    nav = fetch_fund_nav_history(code)
-    n = save_nav(cfg.db_path, code, nav)
+    try:
+        nav = fetch_fund_nav_history(code)
+        n = save_nav(cfg.db_path, code, nav)
+        latest_nav_date = str(nav["trade_date"].iloc[-1]) if not nav.empty else None
+        record_source_attempt(
+            cfg.db_path, "fund_nav", code, not nav.empty, n, latest_nav_date,
+            None if not nav.empty else "no NAV data returned",
+        )
+    except Exception as exc:
+        record_source_attempt(
+            cfg.db_path, "fund_nav", code, False, error=str(exc)
+        )
+        raise
+
     holdings = fetch_fund_holdings(code)
-    save_holdings(cfg.db_path, code, holdings)
+    holdings_count = save_holdings(cfg.db_path, code, holdings)
+    holdings_date = (
+        str(holdings["report_date"].max()) if not holdings.empty else None
+    )
+    record_source_attempt(
+        cfg.db_path,
+        "fund_holdings",
+        code,
+        not holdings.empty,
+        holdings_count,
+        holdings_date,
+        None if not holdings.empty else "no holdings data returned",
+    )
     latest = nav.iloc[-1] if not nav.empty else None
     return {
         "code": code,
@@ -70,17 +96,35 @@ def tool_refresh_market_data(cfg: Config) -> dict:
         try:
             df = fetcher()
             n = save_market(cfg.db_path, sym, df)
+            latest_date = str(df["trade_date"].iloc[-1]) if not df.empty else None
+            record_source_attempt(
+                cfg.db_path, "market", sym, not df.empty, n, latest_date,
+                None if not df.empty else "no market data returned",
+            )
             out[sym] = {"rows": n, "latest": float(df["close"].iloc[-1])}
         except Exception as e:
             logger.error(f"[market] {sym} 失败: {e}")
+            record_source_attempt(
+                cfg.db_path, "market", sym, False, error=str(e)
+            )
             out[sym] = {"error": str(e)}
     return out
 
 
 def tool_refresh_news(cfg: Config, limit: int = 100) -> dict:
-    df = fetch_market_news(limit=limit)
-    n = save_news(cfg.db_path, df)
-    return {"fetched": len(df), "newly_saved": n}
+    try:
+        df = fetch_market_news(limit=limit)
+        n = save_news(cfg.db_path, df)
+        latest = str(df["publish_at"].max()) if not df.empty else date.today().isoformat()
+        record_source_attempt(
+            cfg.db_path, "news", "market", True, len(df), latest
+        )
+        return {"fetched": len(df), "newly_saved": n}
+    except Exception as exc:
+        record_source_attempt(
+            cfg.db_path, "news", "market", False, error=str(exc)
+        )
+        raise
 
 
 # ============ Analysis Agent tools ============
@@ -93,6 +137,54 @@ def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
     ndx_df = load_market(cfg.db_path, "NDX", days=400)
     fx_df = load_market(cfg.db_path, "USDCNY", days=400)
     idx_df = load_market(cfg.db_path, "HS300", days=400)
+
+    nav_date = str(nav_df["trade_date"].iloc[-1]) if not nav_df.empty else None
+    holdings_date = (
+        str(holdings["report_date"].max()) if not holdings.empty else None
+    )
+    if fund.type == "qdii_index":
+        market_dates = [
+            str(frame["trade_date"].iloc[-1])
+            for frame in (ndx_df, fx_df)
+            if not frame.empty
+        ]
+        market_date = min(market_dates) if len(market_dates) == 2 else None
+    else:
+        market_date = str(idx_df["trade_date"].iloc[-1]) if not idx_df.empty else None
+    news_status = load_source_status(cfg.db_path, "news", "market")
+    news_refresh_date = news_status["last_success_at"] if news_status else None
+
+    preliminary_quality = assess_quality(
+        as_of=date.today(),
+        nav_rows=len(nav_df),
+        nav_date=nav_date,
+        market_date=market_date,
+        holdings_date=holdings_date,
+        news_refresh_date=news_refresh_date,
+        event_available=True,
+        config=cfg.quality,
+    )
+    if preliminary_quality.status == "unscorable":
+        return {
+            "code": fund.code,
+            "name": fund.name,
+            "type": fund.type,
+            "score_date": date.today().isoformat(),
+            "technical": None,
+            "valuation": None,
+            "event": None,
+            "observation": {
+                "score": None,
+                "level": None,
+                "used_dimensions": [],
+            },
+            "total_score": None,
+            "observation_level": None,
+            "quality": asdict(preliminary_quality),
+            "scoring_version": cfg.scoring.version,
+            "related_news_count": 0,
+            "market_events": "",
+        }
 
     tech = compute_technical_score(nav_df)
     val = compute_valuation_score(
@@ -111,26 +203,32 @@ def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
 
     # 结构化市场事件(对 QDII 尤其重要)
     market_events = build_market_events(cfg.db_path, fund.type)
-    events_str = format_events_for_llm(market_events)
+    events_str = format_events_for_llm(market_events) if market_events else ""
 
     event = compute_event_score(
         cfg.llm, fund.name, fund.type, holdings, related, events_str
     )
 
-    w = cfg.scoring.weights
-    total = tech.score * w.technical + val.score * w.valuation + event.score * w.event
-
-    th = cfg.scoring.thresholds
-    if total >= th.strong_buy:
-        rec = "strong_buy"
-    elif total >= th.buy:
-        rec = "buy"
-    elif total >= th.neutral:
-        rec = "neutral"
-    elif total >= th.avoid:
-        rec = "watch"
-    else:
-        rec = "avoid"
+    quality = assess_quality(
+        as_of=date.today(),
+        nav_rows=len(nav_df),
+        nav_date=nav_date,
+        market_date=market_date,
+        holdings_date=holdings_date,
+        news_refresh_date=news_refresh_date,
+        event_available=event.available,
+        config=cfg.quality,
+        valuation_fallback=val.method == "fallback_nav_quantile",
+    )
+    observation = compose_observation(
+        {
+            "technical": tech.score,
+            "valuation": val.score,
+            "event": event.score if event.available else None,
+        },
+        cfg.scoring.weights,
+        cfg.scoring.thresholds,
+    )
 
     result = {
         "code": fund.code,
@@ -140,8 +238,12 @@ def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
         "technical": {**asdict(tech)},
         "valuation": {**asdict(val)},
         "event": {**asdict(event)},
-        "total_score": round(total, 1),
-        "recommendation": rec,
+        "observation": asdict(observation),
+        "total_score": observation.score,
+        "observation_level": observation.level,
+        "recommendation": observation.level,
+        "quality": asdict(quality),
+        "scoring_version": cfg.scoring.version,
         "related_news_count": len(related),
         "market_events": events_str,
     }
@@ -154,8 +256,9 @@ def _persist_score(cfg: Config, r: dict) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO daily_scores"
             "(code, score_date, technical_score, valuation_score, event_score, "
-            " total_score, recommendation, reason, raw_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            " total_score, recommendation, reason, raw_json, observation_level, "
+            " quality_status, quality_json, scoring_version) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 r["code"],
                 r["score_date"],
@@ -166,6 +269,10 @@ def _persist_score(cfg: Config, r: dict) -> None:
                 r["recommendation"],
                 r["event"].get("reason", ""),
                 json.dumps(r, ensure_ascii=False),
+                r["observation_level"],
+                r["quality"]["status"],
+                json.dumps(r["quality"], ensure_ascii=False),
+                r["scoring_version"],
             ),
         )
 

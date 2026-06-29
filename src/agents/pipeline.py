@@ -39,14 +39,26 @@ def run_analysis_agent(cfg: Config) -> list[dict]:
     for fund in cfg.funds:
         try:
             r = tool_score_fund(cfg, fund)
-            logger.success(
-                f"  {fund.name}({fund.code}): {r['total_score']} → {r['recommendation']}"
-            )
+            if r["total_score"] is None:
+                logger.warning(
+                    f"  {fund.name}({fund.code}): 不可评分 → {r['quality']['issues']}"
+                )
+            else:
+                logger.success(
+                    f"  {fund.name}({fund.code}): {r['total_score']} → "
+                    f"{r['observation_level']} ({r['quality']['status']})"
+                )
             results.append(r)
         except Exception as e:
             logger.error(f"  打分失败 {fund.code}: {e}")
     # 按总分降序
-    results.sort(key=lambda x: x["total_score"], reverse=True)
+    results.sort(
+        key=lambda item: (
+            item["total_score"] is not None,
+            item["total_score"] if item["total_score"] is not None else -1,
+        ),
+        reverse=True,
+    )
     return results
 
 
