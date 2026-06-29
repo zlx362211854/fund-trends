@@ -85,6 +85,7 @@ def test_fixed_data_generates_observation_report_and_png(tmp_path, monkeypatch):
     render_dashboard(results, output)
 
     assert len(results) == 1
-    assert "观察分" in body
+    assert "长期持有条件" in body
+    assert "当前投入时机" in body
     assert "数据可信度" in body
     assert output.stat().st_size > 10_000
