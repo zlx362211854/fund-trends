@@ -53,3 +53,17 @@ def test_missing_technical_dimension_is_unscorable():
     )
     assert result.score is None
     assert result.level is None
+
+
+def test_chinese_quarter_holding_date_is_supported():
+    result = assess_quality(
+        as_of=date(2026, 1, 2),
+        nav_rows=250,
+        nav_date="2026-01-02",
+        market_date="2026-01-02",
+        holdings_date="2025年4季度股票投资明细",
+        news_refresh_date="2026-01-02",
+        event_available=True,
+        config=QualityConfig(),
+    )
+    assert result.status == "reliable"

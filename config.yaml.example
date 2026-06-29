@@ -18,9 +18,9 @@ funds:
     type: domestic_index         # 国内指数基金
 
 # 基金类型说明:
-#   domestic_active  - 国内主动基金(用持仓股 PE 算估值)
-#   domestic_index   - 国内指数基金(用跟踪指数 PE 分位)
-#   qdii_index       - 纳指等海外 QDII(用美股指数 + 汇率因子)
+#   domestic_active  - 国内主动基金(当前使用净值分位代理)
+#   domestic_index   - 国内指数基金(当前使用跟踪指数价格分位代理)
+#   qdii_index       - 纳指等海外 QDII(指数价格分位 + 汇率因子)
 
 # 打分权重(总和 = 1.0)
 scoring:

@@ -23,6 +23,11 @@ def test_init_db_is_idempotent_and_adds_observation_schema(tmp_path):
         "scoring_version",
     } <= columns
     assert {"data_source_status", "signal_outcomes"} <= tables
+    with sqlite3.connect(path) as conn:
+        outcome_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(signal_outcomes)")
+        }
+    assert "start_date" in outcome_columns
 
 
 def test_source_status_preserves_last_success_on_failure(tmp_path):

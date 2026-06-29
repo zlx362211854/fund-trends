@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from statistics import median
 
 import pandas as pd
@@ -101,13 +102,22 @@ def _benchmark_return(
     return round((end_value / start_value - 1) * 100, 4)
 
 
+def _signal_start_date(signal) -> str:
+    try:
+        snapshot = json.loads(signal["raw_json"] or "{}")
+        nav_date = snapshot["quality"]["data_dates"]["nav"]
+        return str(nav_date) if nav_date else signal["score_date"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return signal["score_date"]
+
+
 def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
     evaluation_date = as_of or date.today()
     fund_types = {fund.code: fund.type for fund in cfg.funds}
     with get_conn(cfg.db_path) as conn:
         signals = conn.execute(
             """
-            SELECT code, score_date, observation_level, scoring_version
+            SELECT code, score_date, observation_level, scoring_version, raw_json
             FROM daily_scores
             WHERE total_score IS NOT NULL
               AND observation_level IS NOT NULL
@@ -123,13 +133,14 @@ def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
         if fund_type is None:
             logger.warning(f"[outcome] 未配置基金 {code},跳过结果评价")
             continue
+        start_date = _signal_start_date(signal)
         nav = _load_values(
             cfg,
             "fund_nav",
-            "unit_nav",
+            "COALESCE(acc_nav, unit_nav)",
             "code",
             code,
-            signal["score_date"],
+            start_date,
             evaluation_date,
         )
         for horizon in HORIZONS:
@@ -144,12 +155,12 @@ def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
                 ).fetchone()
             if exists:
                 continue
-            matured = interval_return(nav, signal["score_date"], horizon)
+            matured = interval_return(nav, start_date, horizon)
             if matured is None:
                 continue
             end_date, fund_return = matured
             benchmark_return = _benchmark_return(
-                cfg, fund_type, signal["score_date"], end_date, evaluation_date
+                cfg, fund_type, start_date, end_date, evaluation_date
             )
             if benchmark_return is None:
                 continue
@@ -159,9 +170,9 @@ def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
                     """
                     INSERT OR IGNORE INTO signal_outcomes(
                         code, signal_date, scoring_version, observation_level,
-                        horizon_days, end_date, fund_return_pct,
+                        horizon_days, start_date, end_date, fund_return_pct,
                         benchmark_return_pct, excess_return_pct, beat_benchmark
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         code,
@@ -169,6 +180,7 @@ def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
                         signal["scoring_version"],
                         signal["observation_level"],
                         horizon,
+                        start_date,
                         end_date,
                         fund_return,
                         benchmark_return,

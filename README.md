@@ -1,141 +1,136 @@
-# 基金趋势监控
+# 基金观察工具
 
-每天 8:00 微信推送基金加仓建议,每周五 17:00 推送周报。基于 akshare + DeepSeek + Server酱,部署在 Vultr。
+面向个人研究的基金观察与验证工具。系统按工作日刷新基金、市场和新闻数据，生成可审计的观察分，并持续评价历史观察记录相对基准的5/20/60日表现。
 
-## 功能
+观察分仅用于研究排序，不是收益预测、上涨概率或操作指令。
 
-- **日报**:每个交易日 8:00 推送 5 只以内基金的加仓吸引力打分(0-100)
-- **周报**:每周五 17:00 推送本周打分趋势 + 关键事件复盘
-- **打分维度**:技术面 40%(分位/回撤/MA/RSI)+ 估值面 30%(分位 + 汇率因子)+ 事件面 30%(LLM 分析持仓相关新闻)
-- **基金类型**:国内主动 / 国内指数 / 纳指 QDII(场外)
+## 核心能力
 
-## 项目结构
+- **观察日报**：技术、估值代理、事件三个维度的 `0-100` 观察分。
+- **数据可信度**：明确区分 `数据可靠`、`数据降级` 和 `不可评分`。
+- **事件审计**：保存LLM模型、分析状态、新闻标题、来源、时间和URL。
+- **前瞻评价**：真实观察记录满5/20/60个基金交易日后，计算相对基准超额收益。
+- **版本隔离**：每条记录带评分版本，规则变化后的结果不会与旧版本混算。
+- **日报与周报**：支持Server酱文字推送和Pillow图片看板。
 
-```
-fund-trends/
-├── config.yaml.example     # 配置模板
-├── requirements.txt
-├── src/
-│   ├── config.py           # 配置加载
-│   ├── db.py               # SQLite schema
-│   ├── data/               # akshare 抓数据
-│   ├── scoring/            # 技术 / 估值 / 事件面打分
-│   ├── agents/             # Agent 编排(pipeline 或 openai-agents SDK)
-│   ├── report/             # 日报 / 周报模板
-│   └── push/               # Server酱
-├── scripts/
-│   ├── init_db.py          # 初始化 DB
-│   ├── backfill.py         # 首次回填历史净值
-│   ├── run_daily.py        # 日报入口
-│   └── run_weekly.py       # 周报入口
-└── data/fund_trends.db     # SQLite(gitignored)
-```
+## 分数含义
 
-## 快速开始(本地)
+默认观察分仍使用原始权重，便于连续比较：
+
+- 技术：40%，包含近1年分位、MA60距离、回撤、RSI和短期趋势过滤。
+- 估值代理：30%。国内主动基金使用净值分位；国内指数使用指数价格分位；QDII使用纳指价格分位和汇率因子。
+- 事件：30%，由LLM基于已发生的市场事件与相关新闻分析。
+
+五档等级为：`高关注 / 较高关注 / 中性观察 / 谨慎观察 / 低关注`。等级只反映当前规则的排序结果。
+
+当前“估值代理”不是真实PE/PB估值。真实估值模型属于后续阶段。
+
+## 数据质量
+
+默认阈值：
+
+| 数据 | 最大自然日时效 |
+| --- | ---: |
+| 基金净值 | 7天 |
+| 市场数据 | 7天 |
+| 基金持仓 | 180天 |
+| 新闻刷新 | 3天 |
+
+净值少于60条或严重过期时，系统不生成数值观察分。可选数据或LLM不可用时，系统按剩余可用维度重新归一化权重，并明确显示“数据降级”及原因。
+
+## 快速开始
+
+建议使用Python 3.11至3.13。
 
 ```bash
-# 1. 准备环境
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. 配置
 cp config.yaml.example config.yaml
-# 编辑 config.yaml:填基金代码、DeepSeek key、Server酱 key
+# 在 .env 中设置 DEEPSEEK_API_KEY 和 SERVERCHAN_KEY
 
-# 3. 初始化数据库 + 回填历史数据(首次,耗时 1-3 分钟)
 python scripts/init_db.py
 python scripts/backfill.py
-
-# 4. 手动跑一次日报(测试)
 python scripts/run_daily.py
 ```
 
-如果一切正常,你的微信会收到一份日报。
+数据库初始化包含幂等迁移。已有部署升级后不需要手工修改SQLite表结构。
 
-## 部署到 Vultr
+## 结果评价
 
-```bash
-# 在 Vultr 服务器上
-git clone <repo> ~/fund-trends
-cd ~/fund-trends
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp config.yaml.example config.yaml
-vim config.yaml                          # 填配置
-python scripts/init_db.py
-python scripts/backfill.py
-```
-
-### 配 cron
+手动更新所有已到期结果：
 
 ```bash
-crontab -e
+python scripts/run_backtest.py
 ```
 
-加入以下两行(注意时区:Vultr 默认 UTC,北京时间 8:00 = UTC 00:00):
+基准口径：
 
-```cron
-# 每个交易日早 8:00(北京时间)推日报
-0 0 * * 1-5  cd /root/fund-trends && /root/fund-trends/.venv/bin/python scripts/run_daily.py >> logs/cron.log 2>&1
+- 国内主动和国内指数基金：沪深300。
+- QDII指数基金：纳指人民币收益，即纳指区间变化与USD/CNY区间变化的乘积。
 
-# 每周五 17:00(北京时间)推周报
-0 9 * * 5  cd /root/fund-trends && /root/fund-trends/.venv/bin/python scripts/run_weekly.py >> logs/cron.log 2>&1
+周报按评分版本、观察等级和期限展示样本数、平均/中位超额收益和跑赢比例。样本少于30条时只标记“证据不足”，不据此调整权重或宣称规则有效。
+
+这是前瞻结果评价，不会使用未来数据重建历史事件分。
+
+## 配置
+
+```yaml
+scoring:
+  version: observation-v1
+  weights:
+    technical: 0.4
+    valuation: 0.3
+    event: 0.3
+
+quality:
+  max_nav_age_days: 7
+  max_market_age_days: 7
+  max_holdings_age_days: 180
+  max_news_refresh_age_days: 3
+  min_nav_rows: 60
 ```
 
-如果服务器是本地时区(`timedatectl set-timezone Asia/Shanghai`):
+改变评分公式或权重后必须更新 `scoring.version`，避免不同规则的结果混在同一统计分组。
 
-```cron
-0 8  * * 1-5  cd /root/fund-trends && .venv/bin/python scripts/run_daily.py >> logs/cron.log 2>&1
-0 17 * * 5    cd /root/fund-trends && .venv/bin/python scripts/run_weekly.py >> logs/cron.log 2>&1
-```
-
-## 切换到 openai-agents SDK 模式
-
-默认 `scripts/run_daily.py` 走直接调用(`src/agents/pipeline.py`),稳定可靠。
-
-如果想让 LLM 自主决策"先查哪个、要不要重试",改 `scripts/run_daily.py`:
-
-```python
-# 把
-from src.agents.pipeline import run_pipeline
-results = run_pipeline(cfg)
-# 改成
-from src.agents.sdk_agents import run_with_sdk
-results = run_with_sdk(cfg)
-```
-
-## 加新基金
-
-只改 `config.yaml`,在 `funds` 列表加一行,然后:
+## 常用命令
 
 ```bash
-python scripts/backfill.py    # 回填新基金的历史数据
-```
+# 运行测试
+pytest -q
 
-下次 cron 触发就会包含新基金。
+# 源码编译检查
+python -m compileall -q src scripts
 
-## 日志和调试
-
-- 应用日志:`logs/fund_trends.log`
-- cron 日志:`logs/cron.log`
-- 数据库:`data/fund_trends.db`(可用 SQLite 工具直接看)
-
-查最近一次打分:
-
-```bash
+# 查看最近观察记录
 sqlite3 data/fund_trends.db \
-  "SELECT score_date, code, total_score, recommendation FROM daily_scores ORDER BY score_date DESC LIMIT 20"
+  "SELECT score_date, code, total_score, observation_level, quality_status, scoring_version FROM daily_scores ORDER BY score_date DESC LIMIT 20"
+
+# 查看已到期结果
+sqlite3 data/fund_trends.db \
+  "SELECT code, signal_date, horizon_days, excess_return_pct, beat_benchmark FROM signal_outcomes ORDER BY signal_date DESC"
 ```
 
-## 风险提示
+## 部署
 
-本工具仅供个人参考,不构成投资建议。LLM 输出可能有误,所有决策请独立判断。
+```bash
+bash deploy/install.sh
+```
 
-## 后续路线图
+默认cron任务：工作日8:00生成日报，周五17:00生成周报。服务器为UTC时，部署脚本会换算为对应的北京时间。
 
-- [ ] 持仓股 PE 加权(目前估值面用净值分位代理)
-- [ ] 财联社电报实时新闻
-- [ ] 信号准确率统计(运行 4 周后启用)
-- [ ] 量化回测模块
+## 局限
+
+- 数据依赖akshare及其上游公开接口，可能延迟或改变字段。
+- 估值维度目前是价格/净值分位代理，不是基本面估值。
+- LLM事件分析可能出错；失败会降级并退出事件维度，但有效输出也不等同于事实核验。
+- 当前基金列表由用户配置，结果不代表完整市场样本。
+- 工具不包含个人风险承受能力、资金期限、仓位和组合约束。
+
+## 后续路线
+
+- 在同版本到期样本达到统计门槛后评估因子和权重。
+- 接入真实PE/PB、持仓加权估值与风格暴露。
+- 增加组合风险预算和相关性分析。
+- 增强新闻来源质量、去重和冲突证据处理。

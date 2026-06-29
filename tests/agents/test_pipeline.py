@@ -1,4 +1,4 @@
-from src.agents.pipeline import run_analysis_agent
+from src.agents.pipeline import run_analysis_agent, run_data_agent
 from src.config import FundConfig
 
 
@@ -27,3 +27,20 @@ def test_analysis_keeps_and_sorts_unscorable_funds(monkeypatch):
     results = run_analysis_agent(FakeConfig())
 
     assert [item["code"] for item in results] == ["000002", "000001"]
+
+
+def test_news_refresh_failure_does_not_abort_data_agent(monkeypatch):
+    class EmptyConfig:
+        funds = []
+
+    monkeypatch.setattr(
+        "src.agents.pipeline.tool_refresh_market_data", lambda cfg: {}
+    )
+    monkeypatch.setattr(
+        "src.agents.pipeline.tool_refresh_news",
+        lambda cfg: (_ for _ in ()).throw(RuntimeError("news timeout")),
+    )
+
+    result = run_data_agent(EmptyConfig())
+
+    assert result["news"] == {"error": "news timeout"}

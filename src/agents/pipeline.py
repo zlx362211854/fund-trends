@@ -29,7 +29,11 @@ def run_data_agent(cfg: Config) -> dict:
             out["funds"][fund.code] = {"error": str(e)}
 
     out["market"] = tool_refresh_market_data(cfg)
-    out["news"] = tool_refresh_news(cfg)
+    try:
+        out["news"] = tool_refresh_news(cfg)
+    except Exception as exc:
+        logger.error(f"[data] 新闻抓取失败: {exc}")
+        out["news"] = {"error": str(exc)}
     return out
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import re
 from typing import Literal
 
 from src.config import QualityConfig, ScoringThresholds, ScoringWeights
@@ -42,7 +43,18 @@ ISSUE_LABELS = {
 def _age_days(value: str | None, as_of: date) -> int | None:
     if not value:
         return None
-    return (as_of - date.fromisoformat(str(value)[:10])).days
+    text = str(value)
+    try:
+        parsed = date.fromisoformat(text[:10])
+    except ValueError:
+        quarter = re.search(r"(\d{4})年([1-4])季度", text)
+        if not quarter:
+            return None
+        year, number = int(quarter.group(1)), int(quarter.group(2))
+        month_day = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+        month, day = month_day[number]
+        parsed = date(year, month, day)
+    return (as_of - parsed).days
 
 
 def assess_quality(

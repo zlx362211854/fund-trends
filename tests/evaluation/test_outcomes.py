@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import json
 
 import pandas as pd
 
@@ -59,7 +60,7 @@ def test_update_mature_domestic_outcome_and_summary(tmp_path):
         {
             "trade_date": dates,
             "unit_nav": [100 + i for i in range(70)],
-            "acc_nav": [100 + i for i in range(70)],
+            "acc_nav": [100 + 2 * i for i in range(70)],
             "daily_pct": [1.0] * 70,
         }
     )
@@ -76,15 +77,16 @@ def test_update_mature_domestic_outcome_and_summary(tmp_path):
         conn.execute(
             """
             INSERT INTO daily_scores(
-                code, score_date, total_score, recommendation,
+                code, score_date, total_score, recommendation, raw_json,
                 observation_level, quality_status, scoring_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "000001",
-                dates[0],
+                dates[1],
                 75.0,
                 "attention",
+                json.dumps({"quality": {"data_dates": {"nav": dates[0]}}}),
                 "attention",
                 "reliable",
                 "observation-v1",
@@ -96,3 +98,10 @@ def test_update_mature_domestic_outcome_and_summary(tmp_path):
     assert {item["horizon_days"] for item in summary} == {5, 20, 60}
     assert all(item["sample_count"] == 1 for item in summary)
     assert all(item["evidence_sufficient"] is False for item in summary)
+    with get_conn(cfg.db_path) as conn:
+        outcome = conn.execute(
+            "SELECT start_date, fund_return_pct FROM signal_outcomes "
+            "WHERE horizon_days = 5"
+        ).fetchone()
+    assert outcome["start_date"] == dates[0]
+    assert outcome["fund_return_pct"] == 10.0

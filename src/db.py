@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS daily_scores (
     valuation_score REAL,
     event_score     REAL,
     total_score     REAL NOT NULL,
-    recommendation  TEXT NOT NULL,    -- strong_buy / buy / neutral / avoid
+    recommendation  TEXT NOT NULL,    -- 旧字段,新代码写入 observation_level 兼容值
     reason          TEXT,             -- LLM 生成的简要说明
     raw_json        TEXT,             -- 完整快照(便于复盘)
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     scoring_version      TEXT NOT NULL,
     observation_level    TEXT NOT NULL,
     horizon_days         INTEGER NOT NULL,
+    start_date           TEXT,
     end_date             TEXT NOT NULL,
     fund_return_pct      REAL NOT NULL,
     benchmark_return_pct REAL NOT NULL,
@@ -119,6 +120,10 @@ DAILY_SCORE_COLUMNS = {
     "scoring_version": "TEXT",
 }
 
+OUTCOME_COLUMNS = {
+    "start_date": "TEXT",
+}
+
 
 def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -133,6 +138,7 @@ def init_db(db_path: str | Path) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA)
         _ensure_columns(conn, "daily_scores", DAILY_SCORE_COLUMNS)
+        _ensure_columns(conn, "signal_outcomes", OUTCOME_COLUMNS)
         conn.commit()
 
 
