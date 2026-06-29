@@ -14,9 +14,9 @@ from src.db import get_conn
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
 def fetch_nasdaq() -> pd.DataFrame:
-    """纳斯达克综合指数历史"""
-    logger.info("[market] 抓取纳指")
-    df = ak.index_us_stock_sina(symbol=".IXIC")
+    """Nasdaq-100 index history."""
+    logger.info("[market] 抓取纳斯达克100指数")
+    df = ak.index_us_stock_sina(symbol=".NDX")
     df = df.rename(columns={"date": "trade_date", "close": "close"})
     df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.strftime("%Y-%m-%d")
     df["close"] = pd.to_numeric(df["close"], errors="coerce")

@@ -24,6 +24,7 @@ from src.data.fund import (
 )
 from src.data.index_valuation import (
     fetch_ndx_forward_pe,
+    load_valuation_snapshot,
     refresh_index_valuation,
 )
 from src.data.market import (
@@ -43,10 +44,11 @@ from src.data.news import (
 )
 from src.data.status import load_source_status, record_source_attempt
 from src.db import get_conn
-from src.quality import assess_quality, compose_observation
+from src.quality import age_days, compose_v2_quality
 from src.scoring.event import compute_event_score
-from src.scoring.technical import compute_technical_score
-from src.scoring.valuation import compute_valuation_score
+from src.scoring.common import HorizonScore
+from src.scoring.long_term import compute_long_term_score
+from src.scoring.timing import compute_timing_score
 
 
 # ============ Data Agent tools ============
@@ -149,71 +151,101 @@ def tool_refresh_valuation_data(cfg: Config, provider=None) -> dict:
 
 # ============ Analysis Agent tools ============
 
+def _latest_date(frame: pd.DataFrame) -> str | None:
+    if frame.empty or "trade_date" not in frame:
+        return None
+    return str(frame["trade_date"].iloc[-1])
+
+
+def _dated_input(
+    data_date: str | None,
+    max_age_days: int,
+    issue_prefix: str,
+    *,
+    failed: bool = False,
+) -> dict:
+    if not data_date:
+        return {
+            "status": "failed" if failed else "missing",
+            "date": None,
+            "issue": f"{issue_prefix}_{'failed' if failed else 'missing'}",
+        }
+    age = age_days(data_date, date.today())
+    if age is None:
+        return {"status": "failed", "date": data_date, "issue": f"{issue_prefix}_failed"}
+    if age > max_age_days:
+        return {"status": "stale", "date": data_date, "issue": f"{issue_prefix}_stale"}
+    return {"status": "ok", "date": data_date}
+
+
+def _build_benchmark(
+    fund_type: str,
+    ndx_df: pd.DataFrame,
+    fx_df: pd.DataFrame,
+    index_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if fund_type != "qdii_index":
+        return index_df.copy()
+    if ndx_df.empty or fx_df.empty:
+        return pd.DataFrame(columns=["trade_date", "close", "daily_pct"])
+    ndx = ndx_df[["trade_date", "close"]].rename(columns={"close": "index_close"})
+    fx = fx_df[["trade_date", "close"]].rename(columns={"close": "fx_close"})
+    benchmark = ndx.merge(fx, on="trade_date", how="inner")
+    benchmark["close"] = (
+        pd.to_numeric(benchmark["index_close"], errors="coerce")
+        * pd.to_numeric(benchmark["fx_close"], errors="coerce")
+    )
+    benchmark["daily_pct"] = benchmark["close"].pct_change() * 100
+    return benchmark[["trade_date", "close", "daily_pct"]].dropna(
+        subset=["close"]
+    )
+
 def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
-    """对单只基金完整打分。"""
+    """Calculate independent long-term and timing observation scores."""
     nav_df = load_nav(cfg.db_path, fund.code, days=1100)  # ~3 年
     holdings = load_holdings(cfg.db_path, fund.code)
 
-    ndx_df = load_market(cfg.db_path, "NDX", days=400)
-    fx_df = load_market(cfg.db_path, "USDCNY", days=400)
-    idx_df = load_market(cfg.db_path, "HS300", days=400)
+    ndx_df = load_market(cfg.db_path, "NDX", days=1100)
+    fx_df = load_market(cfg.db_path, "USDCNY", days=1100)
+    idx_df = load_market(cfg.db_path, "HS300", days=1100)
+    benchmark_df = _build_benchmark(fund.type, ndx_df, fx_df, idx_df)
 
-    nav_date = str(nav_df["trade_date"].iloc[-1]) if not nav_df.empty else None
+    nav_date = _latest_date(nav_df)
     holdings_date = (
         str(holdings["report_date"].max()) if not holdings.empty else None
     )
-    if fund.type == "qdii_index":
-        market_dates = [
-            str(frame["trade_date"].iloc[-1])
-            for frame in (ndx_df, fx_df)
-            if not frame.empty
-        ]
-        market_date = min(market_dates) if len(market_dates) == 2 else None
-    else:
-        market_date = str(idx_df["trade_date"].iloc[-1]) if not idx_df.empty else None
     news_status = load_source_status(cfg.db_path, "news", "market")
     news_refresh_date = news_status["last_success_at"] if news_status else None
 
-    preliminary_quality = assess_quality(
-        as_of=date.today(),
-        nav_rows=len(nav_df),
-        nav_date=nav_date,
-        market_date=market_date,
-        holdings_date=holdings_date,
-        news_refresh_date=news_refresh_date,
-        event_available=True,
-        config=cfg.quality,
-    )
-    if preliminary_quality.status == "unscorable":
-        return {
-            "code": fund.code,
-            "name": fund.name,
-            "type": fund.type,
-            "score_date": date.today().isoformat(),
-            "technical": None,
-            "valuation": None,
-            "event": None,
-            "observation": {
-                "score": None,
-                "level": None,
-                "used_dimensions": [],
-            },
-            "total_score": None,
-            "observation_level": None,
-            "quality": asdict(preliminary_quality),
-            "scoring_version": cfg.scoring.version,
-            "related_news_count": 0,
-            "market_events": "",
-        }
-
-    tech = compute_technical_score(nav_df)
-    val = compute_valuation_score(
-        fund_type=fund.type,
-        nav_df=nav_df,
-        nasdaq_df=ndx_df,
-        fx_df=fx_df,
-        index_df=idx_df,
-    )
+    timing_input = benchmark_df if fund.type != "domestic_active" else nav_df
+    timing = compute_timing_score(timing_input, cfg.scoring.timing_weights)
+    if fund.type == "qdii_index":
+        valuation = load_valuation_snapshot(
+            cfg.db_path,
+            "NDX",
+            "forward_pe",
+            max_age_days=cfg.scoring.max_valuation_age_days,
+            min_samples=cfg.scoring.min_valuation_samples,
+        )
+        long_term = compute_long_term_score(
+            nav_df,
+            benchmark_df,
+            valuation,
+            cfg.scoring.long_term_weights,
+        )
+    elif fund.type == "domestic_index":
+        valuation = None
+        long_term = compute_long_term_score(
+            nav_df,
+            benchmark_df,
+            valuation,
+            cfg.scoring.long_term_weights,
+        )
+    else:
+        valuation = None
+        long_term = HorizonScore(
+            None, None, issues=["active_fundamentals_unavailable"]
+        )
 
     # 新闻按 fund_type 关键词包筛选
     news = load_recent_news(cfg.db_path, hours=48)
@@ -229,25 +261,58 @@ def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
         cfg.llm, fund.name, fund.type, holdings, related, events_str
     )
 
-    quality = assess_quality(
-        as_of=date.today(),
-        nav_rows=len(nav_df),
-        nav_date=nav_date,
-        market_date=market_date,
-        holdings_date=holdings_date,
-        news_refresh_date=news_refresh_date,
-        event_available=event.available,
-        config=cfg.quality,
-        valuation_fallback=val.method == "fallback_nav_quantile",
-    )
-    observation = compose_observation(
-        {
-            "technical": tech.score,
-            "valuation": val.score,
-            "event": event.score if event.available else None,
+    inputs = {
+        "nav": _dated_input(nav_date, cfg.quality.max_nav_age_days, "nav"),
+        "holdings": _dated_input(
+            holdings_date, cfg.quality.max_holdings_age_days, "holdings"
+        ),
+        "news": _dated_input(
+            news_refresh_date,
+            cfg.quality.max_news_refresh_age_days,
+            "news_refresh",
+            failed=bool(news_status and news_status.get("last_error")),
+        ),
+        "event": {
+            "status": "ok" if event.available else "failed",
+            "date": event.generated_at,
+            **({} if event.available else {"issue": "event_unavailable"}),
         },
-        cfg.scoring.weights,
-        cfg.scoring.thresholds,
+    }
+    if fund.type == "qdii_index":
+        inputs["ndx_market"] = _dated_input(
+            _latest_date(ndx_df), cfg.quality.max_market_age_days, "ndx_market"
+        )
+        inputs["usdcny"] = _dated_input(
+            _latest_date(fx_df), cfg.quality.max_market_age_days, "usdcny"
+        )
+        valuation_status = "missing"
+        valuation_date = None
+        valuation_issue = "valuation_missing"
+        if valuation is not None:
+            valuation_date = valuation.data_date
+            valuation_status = {
+                "fresh": "ok",
+                "cached": "cached",
+                "stale": "stale",
+                "missing": "missing",
+            }.get(valuation.cache_status, "failed")
+            valuation_issue = valuation.issues[0] if valuation.issues else ""
+        inputs["ndx_valuation"] = {
+            "status": valuation_status,
+            "date": valuation_date,
+            **({"issue": valuation_issue} if valuation_issue else {}),
+        }
+    else:
+        inputs["hs300_market"] = _dated_input(
+            _latest_date(idx_df), cfg.quality.max_market_age_days, "hs300_market"
+        )
+
+    score_issues = [*long_term.issues, *timing.issues]
+    quality = compose_v2_quality(
+        inputs=inputs,
+        long_term_available=long_term.score is not None,
+        timing_available=timing.score is not None,
+        score_issues=score_issues,
     )
 
     result = {
@@ -255,13 +320,9 @@ def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
         "name": fund.name,
         "type": fund.type,
         "score_date": date.today().isoformat(),
-        "technical": {**asdict(tech)},
-        "valuation": {**asdict(val)},
+        "long_term": asdict(long_term),
+        "timing": asdict(timing),
         "event": {**asdict(event)},
-        "observation": asdict(observation),
-        "total_score": observation.score,
-        "observation_level": observation.level,
-        "recommendation": observation.level,
         "quality": asdict(quality),
         "scoring_version": cfg.scoring.version,
         "related_news_count": len(related),
@@ -272,27 +333,41 @@ def tool_score_fund(cfg: Config, fund: FundConfig) -> dict:
 
 
 def _persist_score(cfg: Config, r: dict) -> None:
+    legacy_score = r["timing"]["score"]
+    if legacy_score is None:
+        legacy_score = r["long_term"]["score"]
+    if legacy_score is None:
+        legacy_score = 0.0
+    legacy_level = r["timing"]["level"] or r["long_term"]["level"] or "unscorable"
+    valuation_factor = r["long_term"].get("factors", {}).get("valuation")
     with get_conn(cfg.db_path) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO daily_scores"
             "(code, score_date, technical_score, valuation_score, event_score, "
             " total_score, recommendation, reason, raw_json, observation_level, "
-            " quality_status, quality_json, scoring_version) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " quality_status, quality_json, scoring_version, long_term_score, "
+            " long_term_level, long_term_json, timing_score, timing_level, timing_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 r["code"],
                 r["score_date"],
-                r["technical"]["score"],
-                r["valuation"]["score"],
+                r["timing"]["score"],
+                valuation_factor,
                 r["event"]["score"],
-                r["total_score"],
-                r["recommendation"],
+                legacy_score,
+                legacy_level,
                 r["event"].get("reason", ""),
                 json.dumps(r, ensure_ascii=False),
-                r["observation_level"],
+                legacy_level,
                 r["quality"]["status"],
                 json.dumps(r["quality"], ensure_ascii=False),
                 r["scoring_version"],
+                r["long_term"]["score"],
+                r["long_term"]["level"],
+                json.dumps(r["long_term"], ensure_ascii=False),
+                r["timing"]["score"],
+                r["timing"]["level"],
+                json.dumps(r["timing"], ensure_ascii=False),
             ),
         )
 

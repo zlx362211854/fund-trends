@@ -9,14 +9,14 @@ class FakeConfig:
     ]
 
 
-def test_analysis_keeps_and_sorts_unscorable_funds(monkeypatch):
+def test_analysis_keeps_configured_order_without_blended_ranking(monkeypatch):
     def fake_score(cfg, fund):
         score = 80.0 if fund.code == "000002" else None
         return {
             "code": fund.code,
             "name": fund.name,
-            "total_score": score,
-            "observation_level": "attention" if score is not None else None,
+            "long_term": {"score": score, "level": "strong" if score else None},
+            "timing": {"score": score, "level": "strong" if score else None},
             "quality": {
                 "status": "reliable" if score is not None else "unscorable",
                 "issues": [],
@@ -26,7 +26,7 @@ def test_analysis_keeps_and_sorts_unscorable_funds(monkeypatch):
     monkeypatch.setattr("src.agents.pipeline.tool_score_fund", fake_score)
     results = run_analysis_agent(FakeConfig())
 
-    assert [item["code"] for item in results] == ["000002", "000001"]
+    assert [item["code"] for item in results] == ["000001", "000002"]
 
 
 def test_news_refresh_failure_does_not_abort_data_agent(monkeypatch):

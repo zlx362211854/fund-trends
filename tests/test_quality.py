@@ -1,7 +1,7 @@
 from datetime import date
 
 from src.config import QualityConfig, ScoringThresholds, ScoringWeights
-from src.quality import assess_quality, compose_observation
+from src.quality import assess_quality, compose_observation, compose_v2_quality
 
 
 def test_stale_nav_is_unscorable():
@@ -67,3 +67,24 @@ def test_chinese_quarter_holding_date_is_supported():
         config=QualityConfig(),
     )
     assert result.status == "reliable"
+
+
+def test_v2_quality_preserves_each_input_state():
+    result = compose_v2_quality(
+        inputs={
+            "nav": {"status": "ok", "date": "2026-06-27"},
+            "ndx_market": {"status": "ok", "date": "2026-06-27"},
+            "usdcny": {"status": "missing", "date": None},
+            "ndx_valuation": {"status": "stale", "date": "2026-06-01"},
+            "news": {"status": "failed", "date": None},
+        },
+        long_term_available=False,
+        timing_available=True,
+        score_issues=["valuation_stale"],
+    )
+
+    assert result.status == "degraded"
+    assert result.inputs["usdcny"]["status"] == "missing"
+    assert result.inputs["ndx_valuation"]["status"] == "stale"
+    assert result.data_dates["ndx_market"] == "2026-06-27"
+    assert "valuation_stale" in result.issues

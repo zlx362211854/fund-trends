@@ -117,10 +117,10 @@ def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
     with get_conn(cfg.db_path) as conn:
         signals = conn.execute(
             """
-            SELECT code, score_date, observation_level, scoring_version, raw_json
+            SELECT code, score_date, observation_level, scoring_version, raw_json,
+                   long_term_score, long_term_level, timing_score, timing_level
             FROM daily_scores
             WHERE total_score IS NOT NULL
-              AND observation_level IS NOT NULL
               AND scoring_version IS NOT NULL
             ORDER BY score_date
             """
@@ -143,52 +143,119 @@ def update_mature_outcomes(cfg: Config, as_of: date | None = None) -> int:
             start_date,
             evaluation_date,
         )
-        for horizon in HORIZONS:
-            with get_conn(cfg.db_path) as conn:
-                exists = conn.execute(
-                    """
-                    SELECT 1 FROM signal_outcomes
-                    WHERE code = ? AND signal_date = ?
-                      AND scoring_version = ? AND horizon_days = ?
-                    """,
-                    (code, signal["score_date"], signal["scoring_version"], horizon),
-                ).fetchone()
-            if exists:
+        if signal["scoring_version"] == "observation-v2":
+            dimensions = [
+                ("long_term", signal["long_term_score"], signal["long_term_level"]),
+                ("timing", signal["timing_score"], signal["timing_level"]),
+            ]
+        else:
+            dimensions = [
+                ("legacy", 1.0, signal["observation_level"]),
+            ]
+
+        for dimension, score, level in dimensions:
+            if score is None or level is None:
                 continue
-            matured = interval_return(nav, start_date, horizon)
-            if matured is None:
-                continue
-            end_date, fund_return = matured
-            benchmark_return = _benchmark_return(
-                cfg, fund_type, start_date, end_date, evaluation_date
-            )
-            if benchmark_return is None:
-                continue
-            excess = round(fund_return - benchmark_return, 4)
-            with get_conn(cfg.db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO signal_outcomes(
-                        code, signal_date, scoring_version, observation_level,
-                        horizon_days, start_date, end_date, fund_return_pct,
-                        benchmark_return_pct, excess_return_pct, beat_benchmark
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        code,
-                        signal["score_date"],
-                        signal["scoring_version"],
-                        signal["observation_level"],
-                        horizon,
-                        start_date,
-                        end_date,
-                        fund_return,
-                        benchmark_return,
-                        excess,
-                        int(excess > 0),
-                    ),
+            for horizon in HORIZONS:
+                table = (
+                    "score_outcomes_v2"
+                    if dimension != "legacy"
+                    else "signal_outcomes"
                 )
-                inserted += conn.total_changes
+                with get_conn(cfg.db_path) as conn:
+                    if dimension == "legacy":
+                        exists = conn.execute(
+                            """
+                            SELECT 1 FROM signal_outcomes
+                            WHERE code = ? AND signal_date = ?
+                              AND scoring_version = ? AND horizon_days = ?
+                            """,
+                            (
+                                code,
+                                signal["score_date"],
+                                signal["scoring_version"],
+                                horizon,
+                            ),
+                        ).fetchone()
+                    else:
+                        exists = conn.execute(
+                            """
+                            SELECT 1 FROM score_outcomes_v2
+                            WHERE code = ? AND signal_date = ?
+                              AND scoring_version = ? AND dimension = ?
+                              AND horizon_days = ?
+                            """,
+                            (
+                                code,
+                                signal["score_date"],
+                                signal["scoring_version"],
+                                dimension,
+                                horizon,
+                            ),
+                        ).fetchone()
+                if exists:
+                    continue
+                matured = interval_return(nav, start_date, horizon)
+                if matured is None:
+                    continue
+                end_date, fund_return = matured
+                benchmark_return = _benchmark_return(
+                    cfg, fund_type, start_date, end_date, evaluation_date
+                )
+                if benchmark_return is None:
+                    continue
+                excess = round(fund_return - benchmark_return, 4)
+                with get_conn(cfg.db_path) as conn:
+                    if table == "signal_outcomes":
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO signal_outcomes(
+                                code, signal_date, scoring_version,
+                                observation_level, horizon_days, start_date,
+                                end_date, fund_return_pct, benchmark_return_pct,
+                                excess_return_pct, beat_benchmark
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                code,
+                                signal["score_date"],
+                                signal["scoring_version"],
+                                level,
+                                horizon,
+                                start_date,
+                                end_date,
+                                fund_return,
+                                benchmark_return,
+                                excess,
+                                int(excess > 0),
+                            ),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO score_outcomes_v2(
+                                code, signal_date, scoring_version, dimension,
+                                level, horizon_days, start_date, end_date,
+                                fund_return_pct, benchmark_return_pct,
+                                excess_return_pct, beat_benchmark
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                code,
+                                signal["score_date"],
+                                signal["scoring_version"],
+                                dimension,
+                                level,
+                                horizon,
+                                start_date,
+                                end_date,
+                                fund_return,
+                                benchmark_return,
+                                excess,
+                                int(excess > 0),
+                            ),
+                        )
+                    inserted += conn.total_changes
     return inserted
 
 
@@ -196,32 +263,47 @@ def load_outcome_summary(
     cfg: Config, min_samples: int = 30
 ) -> list[dict]:
     with get_conn(cfg.db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT scoring_version, observation_level, horizon_days,
-                   excess_return_pct, beat_benchmark
-            FROM signal_outcomes
-            WHERE scoring_version = ?
-            ORDER BY observation_level, horizon_days
-            """,
-            (cfg.scoring.version,),
-        ).fetchall()
-    groups: dict[tuple[str, str, int], list] = {}
+        if cfg.scoring.version == "observation-v2":
+            rows = conn.execute(
+                """
+                SELECT scoring_version, dimension, level, horizon_days,
+                       excess_return_pct, beat_benchmark
+                FROM score_outcomes_v2
+                WHERE scoring_version = ?
+                ORDER BY dimension, level, horizon_days
+                """,
+                (cfg.scoring.version,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT scoring_version, 'legacy' AS dimension,
+                       observation_level AS level, horizon_days,
+                       excess_return_pct, beat_benchmark
+                FROM signal_outcomes
+                WHERE scoring_version = ?
+                ORDER BY observation_level, horizon_days
+                """,
+                (cfg.scoring.version,),
+            ).fetchall()
+    groups: dict[tuple[str, str, str, int], list] = {}
     for row in rows:
         key = (
             row["scoring_version"],
-            row["observation_level"],
+            row["dimension"],
+            row["level"],
             int(row["horizon_days"]),
         )
         groups.setdefault(key, []).append(row)
 
     summary: list[dict] = []
-    for (version, level, horizon), items in groups.items():
+    for (version, dimension, level, horizon), items in groups.items():
         excess = [float(item["excess_return_pct"]) for item in items]
         count = len(items)
         summary.append(
             {
                 "scoring_version": version,
+                "dimension": dimension,
                 "observation_level": level,
                 "horizon_days": horizon,
                 "sample_count": count,
@@ -238,5 +320,9 @@ def load_outcome_summary(
         )
     return sorted(
         summary,
-        key=lambda item: (item["horizon_days"], item["observation_level"]),
+        key=lambda item: (
+            item["dimension"],
+            item["horizon_days"],
+            item["observation_level"],
+        ),
     )

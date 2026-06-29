@@ -15,7 +15,7 @@ from src.config import (
 from src.data.fund import save_holdings, save_nav
 from src.data.market import save_market
 from src.data.status import record_source_attempt
-from src.db import init_db
+from src.db import get_conn, init_db
 from src.scoring.event import EventScore
 
 
@@ -37,13 +37,13 @@ def _config(tmp_path):
 def _seed(cfg):
     init_db(cfg.db_path)
     today = date.today()
-    dates = [(today - timedelta(days=offset)).isoformat() for offset in range(119, -1, -1)]
+    dates = [(today - timedelta(days=offset)).isoformat() for offset in range(299, -1, -1)]
     nav = pd.DataFrame(
         {
             "trade_date": dates,
-            "unit_nav": [1 + i / 1000 for i in range(120)],
-            "acc_nav": [1 + i / 1000 for i in range(120)],
-            "daily_pct": [0.1] * 120,
+            "unit_nav": [1 + i / 1000 for i in range(300)],
+            "acc_nav": [1 + i / 1000 for i in range(300)],
+            "daily_pct": [0.1] * 300,
         }
     )
     save_nav(cfg.db_path, "000001", nav)
@@ -52,7 +52,7 @@ def _seed(cfg):
     )
     save_holdings(cfg.db_path, "000001", holdings)
     market = pd.DataFrame(
-        {"trade_date": dates, "close": [3000 + i for i in range(120)], "daily_pct": [0.1] * 120}
+        {"trade_date": dates, "close": [3000 + i for i in range(300)], "daily_pct": [0.1] * 300}
     )
     save_market(cfg.db_path, "HS300", market)
     record_source_attempt(cfg.db_path, "news", "market", True, 0, today.isoformat())
@@ -71,9 +71,54 @@ def test_score_fund_marks_missing_event_as_degraded(tmp_path, monkeypatch):
     result = tool_score_fund(cfg, cfg.funds[0])
 
     assert result["quality"]["status"] == "degraded"
-    assert result["observation_level"] is not None
-    assert "event" not in result["observation"]["used_dimensions"]
+    assert result["timing"]["score"] is not None
+    assert result["long_term"]["score"] is None
+    assert result["quality"]["inputs"]["event"]["status"] == "failed"
     assert result["scoring_version"] == cfg.scoring.version
+
+
+def test_event_analysis_does_not_change_dual_scores(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    _seed(cfg)
+    monkeypatch.setattr(
+        "src.agents.tools.compute_event_score",
+        lambda *args, **kwargs: EventScore(5.0, "低事件分", [], status="ok"),
+    )
+    first = tool_score_fund(cfg, cfg.funds[0])
+    monkeypatch.setattr(
+        "src.agents.tools.compute_event_score",
+        lambda *args, **kwargs: EventScore(95.0, "高事件分", [], status="ok"),
+    )
+    second = tool_score_fund(cfg, cfg.funds[0])
+
+    assert first["timing"]["score"] == second["timing"]["score"]
+    assert first["long_term"]["score"] == second["long_term"]["score"]
+
+
+def test_missing_valuation_keeps_qdii_timing_score(tmp_path, monkeypatch):
+    fund = FundConfig("000001", "纳指测试基金", "qdii_index")
+    cfg = _config(tmp_path)
+    cfg.funds = [fund]
+    _seed(cfg)
+    with get_conn(cfg.db_path) as conn:
+        hs300 = pd.read_sql(
+            "SELECT trade_date, close, daily_pct FROM market_data WHERE symbol='HS300'",
+            conn,
+        )
+    save_market(cfg.db_path, "NDX", hs300)
+    fx = hs300.copy()
+    fx["close"] = 7.0
+    save_market(cfg.db_path, "USDCNY", fx)
+    monkeypatch.setattr(
+        "src.agents.tools.compute_event_score",
+        lambda *args, **kwargs: EventScore(50.0, "无重大事件", [], status="ok"),
+    )
+
+    result = tool_score_fund(cfg, fund)
+
+    assert result["long_term"]["score"] is None
+    assert result["timing"]["score"] is not None
+    assert result["quality"]["inputs"]["ndx_valuation"]["status"] == "missing"
 
 
 def test_valuation_refresh_is_shared_by_qdii_funds(tmp_path):

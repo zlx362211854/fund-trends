@@ -37,10 +37,10 @@ def test_qdii_benchmark_combines_index_and_fx():
     assert qdii_benchmark_return(100, 110, 7.0, 7.07) == 11.1
 
 
-def _config(tmp_path):
+def _config(tmp_path, version="observation-v2"):
     return Config(
         funds=[FundConfig("000001", "测试基金", "domestic_active")],
-        scoring=ScoringConfig(),
+        scoring=ScoringConfig(version=version),
         quality=QualityConfig(),
         llm=LLMConfig("test", "key", "https://example.invalid", "test"),
         push=PushConfig("key"),
@@ -52,7 +52,7 @@ def _config(tmp_path):
 
 
 def test_update_mature_domestic_outcome_and_summary(tmp_path):
-    cfg = _config(tmp_path)
+    cfg = _config(tmp_path, version="observation-v1")
     init_db(cfg.db_path)
     start = date(2026, 1, 1)
     dates = [(start + timedelta(days=i)).isoformat() for i in range(70)]
@@ -105,3 +105,58 @@ def test_update_mature_domestic_outcome_and_summary(tmp_path):
         ).fetchone()
     assert outcome["start_date"] == dates[0]
     assert outcome["fund_return_pct"] == 10.0
+
+
+def test_v2_outcomes_are_grouped_by_score_dimension(tmp_path):
+    cfg = _config(tmp_path)
+    init_db(cfg.db_path)
+    start = date(2026, 1, 1)
+    dates = [(start + timedelta(days=i)).isoformat() for i in range(70)]
+    nav = pd.DataFrame(
+        {
+            "trade_date": dates,
+            "unit_nav": [100 + i for i in range(70)],
+            "acc_nav": [100 + 2 * i for i in range(70)],
+            "daily_pct": [1.0] * 70,
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "trade_date": dates,
+            "close": [100 + i / 2 for i in range(70)],
+            "daily_pct": [0.5] * 70,
+        }
+    )
+    save_nav(cfg.db_path, "000001", nav)
+    save_market(cfg.db_path, "HS300", market)
+    with get_conn(cfg.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO daily_scores(
+                code, score_date, total_score, recommendation, raw_json,
+                observation_level, quality_status, scoring_version,
+                long_term_score, long_term_level, timing_score, timing_level
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "000001",
+                dates[1],
+                65.0,
+                "above_average",
+                json.dumps({"quality": {"data_dates": {"nav": dates[0]}}}),
+                "above_average",
+                "reliable",
+                "observation-v2",
+                72.0,
+                "above_average",
+                65.0,
+                "above_average",
+            ),
+        )
+
+    assert update_mature_outcomes(cfg, as_of=date(2026, 3, 31)) == 6
+    summary = load_outcome_summary(cfg)
+
+    assert {item["dimension"] for item in summary} == {"long_term", "timing"}
+    assert len(summary) == 6
+    assert all(item["sample_count"] == 1 for item in summary)

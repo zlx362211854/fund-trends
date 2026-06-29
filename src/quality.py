@@ -1,7 +1,7 @@
 """Data quality gates and score composition for observation results."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import re
 from typing import Literal
@@ -16,6 +16,7 @@ class QualityResult:
     status: QualityStatus
     issues: list[str]
     data_dates: dict[str, str | None]
+    inputs: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -37,10 +38,20 @@ ISSUE_LABELS = {
     "news_refresh_stale": "新闻数据未及时刷新",
     "event_unavailable": "事件分析不可用",
     "valuation_fallback": "估值代理使用净值分位回退",
+    "valuation_missing": "缺少真实指数估值数据",
+    "valuation_stale": "真实指数估值数据过期",
+    "valuation_history_insufficient": "真实指数估值历史样本不足",
+    "refresh_failed": "估值数据本次刷新失败，已检查缓存",
+    "timing_history_insufficient": "时机评分所需历史数据不足",
+    "long_term_history_insufficient": "长期评分所需基准历史不足",
+    "tracking_history_insufficient": "基金与基准重合历史不足",
+    "ndx_market_missing": "缺少纳斯达克100行情",
+    "usdcny_missing": "缺少美元兑人民币汇率",
+    "active_fundamentals_unavailable": "主动基金基本面评价尚不可用",
 }
 
 
-def _age_days(value: str | None, as_of: date) -> int | None:
+def age_days(value: str | None, as_of: date) -> int | None:
     if not value:
         return None
     text = str(value)
@@ -74,7 +85,7 @@ def assess_quality(
         issues.append("nav_missing")
     if nav_rows < config.min_nav_rows:
         issues.append("nav_insufficient")
-    nav_age = _age_days(nav_date, as_of)
+    nav_age = age_days(nav_date, as_of)
     if nav_age is not None and nav_age > config.max_nav_age_days:
         issues.append("nav_stale")
 
@@ -94,7 +105,7 @@ def assess_quality(
         ("news_refresh", news_refresh_date, config.max_news_refresh_age_days),
     )
     for name, value, max_age in checks:
-        age = _age_days(value, as_of)
+        age = age_days(value, as_of)
         if age is None:
             issues.append(f"{name}_missing")
         elif age > max_age:
@@ -140,3 +151,29 @@ def compose_observation(
     else:
         level = "low_attention"
     return ObservationResult(score, level, used)
+
+
+def compose_v2_quality(
+    *,
+    inputs: dict[str, dict],
+    long_term_available: bool,
+    timing_available: bool,
+    score_issues: list[str],
+) -> QualityResult:
+    issues = list(dict.fromkeys(score_issues))
+    for name, item in inputs.items():
+        status = item.get("status")
+        if status in {"missing", "stale", "failed", "insufficient"}:
+            issue = item.get("issue") or f"{name}_{status}"
+            if issue not in issues:
+                issues.append(issue)
+    if not long_term_available and not timing_available:
+        status: QualityStatus = "unscorable"
+    elif issues or any(
+        item.get("status") not in {"ok"} for item in inputs.values()
+    ):
+        status = "degraded"
+    else:
+        status = "reliable"
+    data_dates = {name: item.get("date") for name, item in inputs.items()}
+    return QualityResult(status, issues, data_dates, inputs)

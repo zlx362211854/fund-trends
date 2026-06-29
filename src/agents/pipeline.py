@@ -46,26 +46,20 @@ def run_analysis_agent(cfg: Config) -> list[dict]:
     for fund in cfg.funds:
         try:
             r = tool_score_fund(cfg, fund)
-            if r["total_score"] is None:
+            long_score = r["long_term"]["score"]
+            timing_score = r["timing"]["score"]
+            if long_score is None and timing_score is None:
                 logger.warning(
                     f"  {fund.name}({fund.code}): 不可评分 → {r['quality']['issues']}"
                 )
             else:
                 logger.success(
-                    f"  {fund.name}({fund.code}): {r['total_score']} → "
-                    f"{r['observation_level']} ({r['quality']['status']})"
+                    f"  {fund.name}({fund.code}): 长期={long_score} "
+                    f"时机={timing_score} ({r['quality']['status']})"
                 )
             results.append(r)
         except Exception as e:
             logger.error(f"  打分失败 {fund.code}: {e}")
-    # 按总分降序
-    results.sort(
-        key=lambda item: (
-            item["total_score"] is not None,
-            item["total_score"] if item["total_score"] is not None else -1,
-        ),
-        reverse=True,
-    )
     return results
 
 
