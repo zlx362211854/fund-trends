@@ -24,15 +24,24 @@ funds:
 
 # 打分权重(总和 = 1.0)
 scoring:
+  version: observation-v1          # 评分规则版本,改变公式时必须更新
   weights:
     technical: 0.4               # 技术面
     valuation: 0.3               # 估值面
     event: 0.3                   # 事件面(LLM 分析新闻)
   thresholds:
-    strong_buy: 85               # 强烈加仓
-    buy: 70                      # 可加仓
-    neutral: 50                  # 小幅加仓 / 定投
-    avoid: 30                    # 观望
+    strong_buy: 85               # 高关注
+    buy: 70                      # 较高关注
+    neutral: 50                  # 中性观察
+    avoid: 30                    # 谨慎观察
+
+# 数据质量阈值(自然日,已覆盖周末和普通节假日)
+quality:
+  max_nav_age_days: 7
+  max_market_age_days: 7
+  max_holdings_age_days: 180
+  max_news_refresh_age_days: 3
+  min_nav_rows: 60
 
 # LLM / 推送的 KEY 走 .env(DEEPSEEK_API_KEY / SERVERCHAN_KEY),
 # 此处可只配置非敏感的参数(可选,有默认值)。

@@ -40,6 +40,16 @@ class ScoringThresholds:
 class ScoringConfig:
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     thresholds: ScoringThresholds = field(default_factory=ScoringThresholds)
+    version: str = "observation-v1"
+
+
+@dataclass
+class QualityConfig:
+    max_nav_age_days: int = 7
+    max_market_age_days: int = 7
+    max_holdings_age_days: int = 180
+    max_news_refresh_age_days: int = 3
+    min_nav_rows: int = 60
 
 
 @dataclass
@@ -66,6 +76,7 @@ class ScheduleConfig:
 class Config:
     funds: list[FundConfig]
     scoring: ScoringConfig
+    quality: QualityConfig
     llm: LLMConfig
     push: PushConfig
     schedule: ScheduleConfig
@@ -92,7 +103,9 @@ def load_config(path: str | Path | None = None) -> Config:
     scoring = ScoringConfig(
         weights=ScoringWeights(**scoring_raw.get("weights", {})),
         thresholds=ScoringThresholds(**scoring_raw.get("thresholds", {})),
+        version=scoring_raw.get("version", "observation-v1"),
     )
+    quality = QualityConfig(**raw.get("quality", {}))
 
     llm_raw = raw.get("llm", {})
     llm_key = os.getenv("DEEPSEEK_API_KEY") or llm_raw.get("api_key", "")
@@ -120,6 +133,7 @@ def load_config(path: str | Path | None = None) -> Config:
     return Config(
         funds=funds,
         scoring=scoring,
+        quality=quality,
         llm=llm,
         push=push,
         schedule=schedule,
