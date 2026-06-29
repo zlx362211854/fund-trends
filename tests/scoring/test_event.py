@@ -29,3 +29,10 @@ def test_parse_event_response_returns_auditable_result():
     assert result.score == 55
     assert result.model == "test-model"
     assert result.evidence == [{"title": "证据"}]
+
+
+def test_parse_event_response_rejects_operation_instruction():
+    with pytest.raises(ValueError, match="operation instruction"):
+        parse_event_response(
+            '{"score": 80, "reason": "建议立即加仓", "risks": []}'
+        )

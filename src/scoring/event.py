@@ -48,6 +48,8 @@ JSON_SCHEMA_HINT = """请按以下 JSON 模式输出:
   "risks": ["<可选,每项不超过 60 字,最多 5 项>"]
 }"""
 
+OPERATION_TERMS = ("买入", "卖出", "加仓", "减仓", "梭哈", "仓位指令")
+
 
 def _evidence_from_news(news: pd.DataFrame) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
@@ -124,6 +126,10 @@ def parse_event_response(
         raise ValueError("risks must be a list with at most 5 items")
     if any(not isinstance(item, str) or len(item) > 60 for item in risks):
         raise ValueError("risks entries must be strings up to 60 characters")
+    if any(term in reason for term in OPERATION_TERMS) or any(
+        term in item for item in risks for term in OPERATION_TERMS
+    ):
+        raise ValueError("response contains an operation instruction")
 
     return EventScore(
         score=float(score),
