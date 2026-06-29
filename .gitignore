@@ -21,5 +21,6 @@ logs/*.log
 # IDE
 .vscode/
 .idea/
+.worktrees/
 *.swp
 .DS_Store
