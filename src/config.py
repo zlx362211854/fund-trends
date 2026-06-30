@@ -29,6 +29,22 @@ class ScoringWeights:
 
 
 @dataclass
+class LongTermWeights:
+    valuation: float = 0.4
+    trend: float = 0.3
+    risk: float = 0.2
+    tracking: float = 0.1
+
+
+@dataclass
+class TimingWeights:
+    trend: float = 0.3
+    deviation: float = 0.3
+    stabilization: float = 0.25
+    temperature: float = 0.15
+
+
+@dataclass
 class ScoringThresholds:
     strong_buy: int = 85
     buy: int = 70
@@ -40,6 +56,20 @@ class ScoringThresholds:
 class ScoringConfig:
     weights: ScoringWeights = field(default_factory=ScoringWeights)
     thresholds: ScoringThresholds = field(default_factory=ScoringThresholds)
+    long_term_weights: LongTermWeights = field(default_factory=LongTermWeights)
+    timing_weights: TimingWeights = field(default_factory=TimingWeights)
+    max_valuation_age_days: int = 7
+    min_valuation_samples: int = 60
+    version: str = "observation-v2"
+
+
+@dataclass
+class QualityConfig:
+    max_nav_age_days: int = 7
+    max_market_age_days: int = 7
+    max_holdings_age_days: int = 180
+    max_news_refresh_age_days: int = 3
+    min_nav_rows: int = 60
 
 
 @dataclass
@@ -66,6 +96,7 @@ class ScheduleConfig:
 class Config:
     funds: list[FundConfig]
     scoring: ScoringConfig
+    quality: QualityConfig
     llm: LLMConfig
     push: PushConfig
     schedule: ScheduleConfig
@@ -92,7 +123,21 @@ def load_config(path: str | Path | None = None) -> Config:
     scoring = ScoringConfig(
         weights=ScoringWeights(**scoring_raw.get("weights", {})),
         thresholds=ScoringThresholds(**scoring_raw.get("thresholds", {})),
+        long_term_weights=LongTermWeights(
+            **scoring_raw.get("long_term_weights", {})
+        ),
+        timing_weights=TimingWeights(**scoring_raw.get("timing_weights", {})),
+        max_valuation_age_days=scoring_raw.get("max_valuation_age_days", 7),
+        min_valuation_samples=scoring_raw.get("min_valuation_samples", 60),
+        version=scoring_raw.get("version", "observation-v2"),
     )
+    for name, weights in (
+        ("long_term_weights", scoring.long_term_weights),
+        ("timing_weights", scoring.timing_weights),
+    ):
+        if abs(sum(vars(weights).values()) - 1.0) > 1e-9:
+            raise ValueError(f"scoring.{name} 权重之和必须为 1.0")
+    quality = QualityConfig(**raw.get("quality", {}))
 
     llm_raw = raw.get("llm", {})
     llm_key = os.getenv("DEEPSEEK_API_KEY") or llm_raw.get("api_key", "")
@@ -120,6 +165,7 @@ def load_config(path: str | Path | None = None) -> Config:
     return Config(
         funds=funds,
         scoring=scoring,
+        quality=quality,
         llm=llm,
         push=push,
         schedule=schedule,

@@ -1,11 +1,10 @@
-"""事件面打分:LLM(DeepSeek)分析持仓相关新闻
-输入:基金信息 + 持仓 + 预筛选新闻
-输出:事件分(0-100, 50 中性) + 简要理由 + 风险提示
-"""
+"""Validated LLM analysis of recent fund-related events."""
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
 
 import pandas as pd
 from loguru import logger
@@ -16,41 +15,55 @@ from src.config import LLMConfig
 
 @dataclass
 class EventScore:
-    score: float             # 0-100, 50 = 中性
-    reason: str              # 一句话理由
-    risks: list[str]         # 风险提示
+    score: float | None
+    reason: str
+    risks: list[str]
+    available: bool = True
+    status: str = "ok"
+    model: str = ""
+    generated_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
-SYSTEM_PROMPT = """你是基金研究助理。给定一只基金的核心持仓、结构化市场事件、最近相关新闻,
-请评估近期事件对"加仓决策"的综合影响,并输出 JSON。
+SYSTEM_PROMPT = """你是基金研究助理。根据基金持仓、结构化市场事件和相关新闻，
+评估这些已发生事实对当前观察优先级的影响，并输出 JSON。
 
 打分规则(0-100,50 为中性):
-- 0-30: 显著不利于加仓(板块/政策/重仓股明显负面;或市场过热)
-- 31-49: 偏负面
-- 50: 无重大消息 / 利好利空对冲
-- 51-70: 偏正面
-- 71-100: 显著利好加仓(行业利好叠加、政策催化、估值修复信号)
+- 0-30: 当前关注吸引力明显偏低
+- 31-49: 当前关注吸引力偏低
+- 50: 无重大消息或影响相互抵消
+- 51-70: 当前关注吸引力偏高
+- 71-100: 多项已发生事实共同支持重点关注
 
-加仓视角的逻辑:
-- 市场已大涨/分位偏高 → 减分(追高不利)
-- 市场已大跌/分位偏低 → 加分(便宜)
-- 利好新闻 → 视情形加分;利空新闻 → 减分
-
-注意:
-- 结构化市场事件(📈/📉)是最重要的信号,优先参考。
-- 新闻必须明确指向该基金的持仓行业/标的才计为有效信号。
-- 无信号 → 50。
-- 不要预测未来,只评估"已发生事件"。
-- 输出必须是合法 JSON,不要解释、不要 markdown 围栏。
+只使用给定证据，不预测未来价格，不给出买入、卖出、加仓、减仓或仓位指令。
+无有效信号时输出 50。输出必须是合法 JSON，不要解释或使用 markdown 围栏。
 """
-
 
 JSON_SCHEMA_HINT = """请按以下 JSON 模式输出:
 {
-  "score": <0-100 的整数>,
-  "reason": "<不超过 30 字的中文一句话理由>",
-  "risks": ["<可选,简短风险点,可为空数组>"]
+  "score": <0-100 的数字>,
+  "reason": "<不超过 60 字的中文一句话理由>",
+  "risks": ["<可选,每项不超过 60 字,最多 5 项>"]
 }"""
+
+OPERATION_TERMS = ("买入", "卖出", "加仓", "减仓", "梭哈", "仓位指令")
+
+
+def _evidence_from_news(news: pd.DataFrame) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for row in news.head(20).itertuples():
+        evidence.append(
+            {
+                "type": "news",
+                "source": str(getattr(row, "source", "")),
+                "title": str(getattr(row, "title", "")),
+                "publish_at": str(getattr(row, "publish_at", "")),
+                "url": str(getattr(row, "url", "")),
+            }
+        )
+    return evidence
 
 
 def _build_user_message(
@@ -62,34 +75,69 @@ def _build_user_message(
 ) -> str:
     holdings_str = "(无持仓数据)"
     if not holdings.empty:
-        top = holdings.head(10)
         holdings_str = "\n".join(
-            f"- {r.stock_name}({r.stock_code}) 占净值 {r.pct:.2f}%"
-            for r in top.itertuples()
+            f"- {row.stock_name}({row.stock_code}) 占净值 {row.pct:.2f}%"
+            for row in holdings.head(10).itertuples()
         )
 
-    if news.empty:
-        news_str = "(无相关新闻)"
-    else:
+    news_str = "(无相关新闻)"
+    if not news.empty:
         news_str = "\n".join(
-            f"[{r.publish_at[:16]}] {r.title}"
-            for r in news.head(20).itertuples()
+            f"[{row.publish_at[:16]}] {row.title}"
+            for row in news.head(20).itertuples()
         )
-
-    events_block = market_events_str or "(无结构化市场事件)"
 
     return f"""基金:{fund_name}(类型:{fund_type})
 
 前十大持仓:
 {holdings_str}
 
-结构化市场事件(关键信号):
-{events_block}
+结构化市场事件:
+{market_events_str or "(无结构化市场事件)"}
 
-近 24 小时相关新闻:
+最近相关新闻:
 {news_str}
 
 {JSON_SCHEMA_HINT}"""
+
+
+def parse_event_response(
+    content: str,
+    *,
+    model: str = "",
+    evidence: list[dict[str, Any]] | None = None,
+) -> EventScore:
+    data = json.loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("response must be a JSON object")
+
+    score = data.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise ValueError("score must be numeric")
+    if not 0 <= float(score) <= 100:
+        raise ValueError("score must be between 0 and 100")
+
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 60:
+        raise ValueError("reason must be a non-empty string up to 60 characters")
+
+    risks = data.get("risks", [])
+    if not isinstance(risks, list) or len(risks) > 5:
+        raise ValueError("risks must be a list with at most 5 items")
+    if any(not isinstance(item, str) or len(item) > 60 for item in risks):
+        raise ValueError("risks entries must be strings up to 60 characters")
+    if any(term in reason for term in OPERATION_TERMS) or any(
+        term in item for item in risks for term in OPERATION_TERMS
+    ):
+        raise ValueError("response contains an operation instruction")
+
+    return EventScore(
+        score=float(score),
+        reason=reason.strip(),
+        risks=[item.strip() for item in risks if item.strip()],
+        model=model,
+        evidence=list(evidence or []),
+    )
 
 
 def compute_event_score(
@@ -100,15 +148,29 @@ def compute_event_score(
     news: pd.DataFrame,
     market_events_str: str = "",
 ) -> EventScore:
-    # 既无新闻也无市场事件 → 返回中性,省一次 LLM 调用
+    evidence = _evidence_from_news(news)
+    if market_events_str:
+        evidence.insert(
+            0,
+            {"type": "market_events", "summary": market_events_str},
+        )
+
     if news.empty and not market_events_str:
-        return EventScore(50.0, "无可用事件,中性", [])
+        return EventScore(
+            50.0,
+            "无重大相关新闻或市场事件",
+            [],
+            status="no_material_news",
+            model=llm_cfg.model,
+            evidence=evidence,
+        )
 
     client = OpenAI(api_key=llm_cfg.api_key, base_url=llm_cfg.base_url)
-    user_msg = _build_user_message(fund_name, fund_type, holdings, news, market_events_str)
-
+    user_msg = _build_user_message(
+        fund_name, fund_type, holdings, news, market_events_str
+    )
     try:
-        resp = client.chat.completions.create(
+        response = client.chat.completions.create(
             model=llm_cfg.model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -117,13 +179,18 @@ def compute_event_score(
             temperature=0.2,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content or "{}"
-        data = json.loads(content)
-        return EventScore(
-            score=float(data.get("score", 50)),
-            reason=str(data.get("reason", "")),
-            risks=list(data.get("risks", []) or []),
+        content = response.choices[0].message.content or "{}"
+        return parse_event_response(
+            content, model=llm_cfg.model, evidence=evidence
         )
-    except Exception as e:
-        logger.error(f"[event] LLM 打分失败 ({fund_name}): {e}")
-        return EventScore(50.0, "事件分析失败,按中性处理", [])
+    except Exception as exc:
+        logger.error(f"[event] LLM 分析失败 ({fund_name}): {exc}")
+        return EventScore(
+            score=None,
+            reason="事件分析不可用",
+            risks=[],
+            available=False,
+            status="error",
+            model=llm_cfg.model,
+            evidence=evidence,
+        )

@@ -1,0 +1,90 @@
+from datetime import date
+
+from src.config import QualityConfig, ScoringThresholds, ScoringWeights
+from src.quality import assess_quality, compose_observation, compose_v2_quality
+
+
+def test_stale_nav_is_unscorable():
+    result = assess_quality(
+        as_of=date(2026, 6, 29),
+        nav_rows=250,
+        nav_date="2026-06-01",
+        market_date="2026-06-27",
+        holdings_date="2026-03-31",
+        news_refresh_date="2026-06-29",
+        event_available=True,
+        config=QualityConfig(),
+    )
+    assert result.status == "unscorable"
+    assert "nav_stale" in result.issues
+
+
+def test_optional_missing_data_is_degraded():
+    result = assess_quality(
+        as_of=date(2026, 6, 29),
+        nav_rows=250,
+        nav_date="2026-06-27",
+        market_date=None,
+        holdings_date="2026-03-31",
+        news_refresh_date="2026-06-29",
+        event_available=False,
+        config=QualityConfig(),
+    )
+    assert result.status == "degraded"
+    assert result.issues == ["market_missing", "event_unavailable"]
+
+
+def test_missing_event_reweights_available_dimensions():
+    result = compose_observation(
+        {"technical": 80.0, "valuation": 40.0, "event": None},
+        ScoringWeights(),
+        ScoringThresholds(),
+    )
+    assert result.score == 62.9
+    assert result.level == "neutral"
+    assert result.used_dimensions == ["technical", "valuation"]
+
+
+def test_missing_technical_dimension_is_unscorable():
+    result = compose_observation(
+        {"technical": None, "valuation": 40.0, "event": 60.0},
+        ScoringWeights(),
+        ScoringThresholds(),
+    )
+    assert result.score is None
+    assert result.level is None
+
+
+def test_chinese_quarter_holding_date_is_supported():
+    result = assess_quality(
+        as_of=date(2026, 1, 2),
+        nav_rows=250,
+        nav_date="2026-01-02",
+        market_date="2026-01-02",
+        holdings_date="2025年4季度股票投资明细",
+        news_refresh_date="2026-01-02",
+        event_available=True,
+        config=QualityConfig(),
+    )
+    assert result.status == "reliable"
+
+
+def test_v2_quality_preserves_each_input_state():
+    result = compose_v2_quality(
+        inputs={
+            "nav": {"status": "ok", "date": "2026-06-27"},
+            "ndx_market": {"status": "ok", "date": "2026-06-27"},
+            "usdcny": {"status": "missing", "date": None},
+            "ndx_valuation": {"status": "stale", "date": "2026-06-01"},
+            "news": {"status": "failed", "date": None},
+        },
+        long_term_available=False,
+        timing_available=True,
+        score_issues=["valuation_stale"],
+    )
+
+    assert result.status == "degraded"
+    assert result.inputs["usdcny"]["status"] == "missing"
+    assert result.inputs["ndx_valuation"]["status"] == "stale"
+    assert result.data_dates["ndx_market"] == "2026-06-27"
+    assert "valuation_stale" in result.issues

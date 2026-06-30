@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS daily_scores (
     valuation_score REAL,
     event_score     REAL,
     total_score     REAL NOT NULL,
-    recommendation  TEXT NOT NULL,    -- strong_buy / buy / neutral / avoid
+    recommendation  TEXT NOT NULL,    -- 旧字段,新代码写入 observation_level 兼容值
     reason          TEXT,             -- LLM 生成的简要说明
     raw_json        TEXT,             -- 完整快照(便于复盘)
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -76,11 +76,100 @@ CREATE TABLE IF NOT EXISTS push_history (
     created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 数据源刷新审计状态
+CREATE TABLE IF NOT EXISTS data_source_status (
+    source           TEXT NOT NULL,
+    subject          TEXT NOT NULL,
+    last_attempt_at  TEXT NOT NULL,
+    last_success_at  TEXT,
+    row_count        INTEGER NOT NULL DEFAULT 0,
+    latest_data_date TEXT,
+    last_error       TEXT,
+    PRIMARY KEY (source, subject)
+);
+
+-- 观察信号到期后的真实结果
+CREATE TABLE IF NOT EXISTS signal_outcomes (
+    code                 TEXT NOT NULL,
+    signal_date          TEXT NOT NULL,
+    scoring_version      TEXT NOT NULL,
+    observation_level    TEXT NOT NULL,
+    horizon_days         INTEGER NOT NULL,
+    start_date           TEXT,
+    end_date             TEXT NOT NULL,
+    fund_return_pct      REAL NOT NULL,
+    benchmark_return_pct REAL NOT NULL,
+    excess_return_pct    REAL NOT NULL,
+    beat_benchmark       INTEGER NOT NULL,
+    evaluated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, signal_date, scoring_version, horizon_days)
+);
+
+-- 指数真实估值历史缓存
+CREATE TABLE IF NOT EXISTS index_valuations (
+    benchmark_code TEXT NOT NULL,
+    metric         TEXT NOT NULL,
+    data_date      TEXT NOT NULL,
+    value          REAL NOT NULL,
+    source         TEXT NOT NULL,
+    fetched_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (benchmark_code, metric, data_date)
+);
+
+-- observation-v2 两个评分维度的到期结果
+CREATE TABLE IF NOT EXISTS score_outcomes_v2 (
+    code                 TEXT NOT NULL,
+    signal_date          TEXT NOT NULL,
+    scoring_version      TEXT NOT NULL,
+    dimension            TEXT NOT NULL,
+    level                TEXT NOT NULL,
+    horizon_days         INTEGER NOT NULL,
+    start_date           TEXT,
+    end_date             TEXT NOT NULL,
+    fund_return_pct      REAL NOT NULL,
+    benchmark_return_pct REAL NOT NULL,
+    excess_return_pct    REAL NOT NULL,
+    beat_benchmark       INTEGER NOT NULL,
+    evaluated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (
+        code, signal_date, scoring_version, dimension, horizon_days
+    )
+);
+
 CREATE INDEX IF NOT EXISTS idx_nav_date ON fund_nav(trade_date);
 CREATE INDEX IF NOT EXISTS idx_market_date ON market_data(trade_date);
 CREATE INDEX IF NOT EXISTS idx_news_publish ON news_cache(publish_at);
 CREATE INDEX IF NOT EXISTS idx_scores_date ON daily_scores(score_date);
+CREATE INDEX IF NOT EXISTS idx_outcomes_signal ON signal_outcomes(signal_date);
+CREATE INDEX IF NOT EXISTS idx_valuations_date ON index_valuations(data_date);
+CREATE INDEX IF NOT EXISTS idx_outcomes_v2_signal
+    ON score_outcomes_v2(signal_date);
 """
+
+
+DAILY_SCORE_COLUMNS = {
+    "observation_level": "TEXT",
+    "quality_status": "TEXT",
+    "quality_json": "TEXT",
+    "scoring_version": "TEXT",
+    "long_term_score": "REAL",
+    "long_term_level": "TEXT",
+    "long_term_json": "TEXT",
+    "timing_score": "REAL",
+    "timing_level": "TEXT",
+    "timing_json": "TEXT",
+}
+
+OUTCOME_COLUMNS = {
+    "start_date": "TEXT",
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, declaration in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
 
 def init_db(db_path: str | Path) -> None:
@@ -88,6 +177,8 @@ def init_db(db_path: str | Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _ensure_columns(conn, "daily_scores", DAILY_SCORE_COLUMNS)
+        _ensure_columns(conn, "signal_outcomes", OUTCOME_COLUMNS)
         conn.commit()
 
 

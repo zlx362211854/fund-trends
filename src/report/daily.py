@@ -1,159 +1,216 @@
-"""日报模板 — Server酱 Markdown 渲染优化版"""
+"""ServerChan Markdown report for dual-horizon observations."""
 from __future__ import annotations
 
 from datetime import date
 
-from src.report.verdict import get_verdict
+from src.quality import ISSUE_LABELS
 
-REC_INFO = {
-    "strong_buy": ("🟢", "强烈加仓"),
-    "buy":        ("🟢", "可加仓"),
-    "neutral":    ("🟡", "小幅 / 定投"),
-    "watch":      ("🟠", "观望"),
-    "avoid":      ("🔴", "暂不加仓"),
+LEVEL_LABELS = {
+    "strong": "条件较强",
+    "above_average": "条件偏强",
+    "neutral": "条件中性",
+    "below_average": "条件偏弱",
+    "weak": "条件较弱",
+}
+
+QUALITY_INFO = {
+    "reliable": ("数据可靠", "✅"),
+    "degraded": ("数据降级", "⚠️"),
+    "unscorable": ("数据不足", "⛔"),
 }
 
 TYPE_TAG = {
     "domestic_active": "国内主动",
-    "domestic_index":  "国内指数",
-    "qdii_index":      "QDII 指数",
+    "domestic_index": "国内指数",
+    "qdii_index": "QDII 指数",
+}
+
+INPUT_LABELS = {
+    "nav": "基金净值",
+    "holdings": "基金持仓",
+    "news": "新闻",
+    "event": "AI事件",
+    "ndx_market": "纳斯达克100行情",
+    "usdcny": "USD/CNY",
+    "ndx_valuation": "纳指估值",
+    "hs300_market": "沪深300行情",
+}
+
+STATUS_LABELS = {
+    "ok": "正常",
+    "cached": "缓存可用",
+    "stale": "过期",
+    "missing": "缺失",
+    "failed": "失败",
+    "insufficient": "样本不足",
 }
 
 
 def _fund_links(code: str) -> tuple[str, str]:
-    """返回 (天天基金详情, F10 资料)"""
     return (
         f"https://fund.eastmoney.com/{code}.html",
         f"https://fundf10.eastmoney.com/jbgk_{code}.html",
     )
 
 
-def _badge(rec: str) -> str:
-    emoji, label = REC_INFO.get(rec, ("⚪", rec))
-    return f"{emoji} **{label}**"
+def _score_text(score: dict) -> str:
+    if score.get("score") is None:
+        return "暂不可评估"
+    label = LEVEL_LABELS.get(score.get("level"), "状态未知")
+    return f"`{score['score']:.0f}/100` · {label}"
 
 
-def _fmt_fund_block(r: dict, rank: int) -> str:
-    tech = r["technical"]
-    val = r["valuation"]
-    ev = r["event"]
-    rec_emoji, rec_label = REC_INFO.get(r["recommendation"], ("⚪", r["recommendation"]))
-    tag = TYPE_TAG.get(r.get("type", ""), "")
+def _combination_summary(result: dict) -> str:
+    long_term = result["long_term"]
+    timing = result["timing"]
+    long_score = long_term.get("score")
+    timing_score = timing.get("score")
+    if long_score is None and timing_score is None:
+        return "核心数据不足，目前无法形成长期条件或当前时机判断。"
+    if long_score is None:
+        return "长期条件因真实估值或基本面数据不足暂不可评估；当前时机仍可独立观察。"
+    if timing_score is None:
+        return "长期条件可以评估，但当前时机所需的价格历史不足。"
+    if long_score >= 60 and timing_score >= 60:
+        return "长期条件和当前时机均偏强，但仍需结合自身风险承受能力判断。"
+    if long_score >= 60 and timing_score < 40:
+        return "长期条件偏强，但当前偏热或尚未企稳，两项结论并不矛盾。"
+    if long_score < 40 and timing_score >= 60:
+        return "当前可能处于修复阶段，但长期依据仍偏弱。"
+    return "长期条件与当前时机信号存在分化，建议分别查看下方驱动因素。"
 
+
+def _long_term_lines(score: dict) -> list[str]:
+    if score.get("score") is None:
+        return [f"- {ISSUE_LABELS.get(issue, issue)}" for issue in score.get("issues", [])]
+    metrics = score.get("metrics", {})
+    lines = [
+        "- 前瞻PE "
+        f"`{metrics.get('valuation_value', 0):.2f}` · 近10年分位 "
+        f"`{metrics.get('valuation_percentile_pct', 0):.0f}%` · "
+        f"数据 `{metrics.get('valuation_date') or '未知'}`",
+        "- 长期趋势："
+        f"近6个月 `{metrics.get('return_6m_pct', 0):+.1f}%` · "
+        f"近12个月 `{metrics.get('return_12m_pct', 0):+.1f}%`",
+        "- 风险与跟踪："
+        f"年化波动 `{metrics.get('annualized_volatility_pct', 0):.1f}%` · "
+        f"最大回撤 `{metrics.get('max_drawdown_pct', 0):.1f}%` · "
+        f"跟踪相关 `{metrics.get('tracking_correlation', 0):.2f}`",
+    ]
+    source = metrics.get("valuation_source")
+    cache = metrics.get("valuation_cache_status")
+    if source:
+        lines.append(f"- 估值来源：`{source}` · 状态 `{cache or '未知'}`")
+    return lines
+
+
+def _timing_lines(score: dict) -> list[str]:
+    if score.get("score") is None:
+        return [f"- {ISSUE_LABELS.get(issue, issue)}" for issue in score.get("issues", [])]
+    metrics = score.get("metrics", {})
+    stabilized = "已出现企稳" if metrics.get("stabilized") == "yes" else "尚未确认企稳"
+    return [
+        "- 趋势状态："
+        f"MA200斜率 `{metrics.get('ma200_slope_pct', 0):+.2f}%`",
+        "- 趋势偏离："
+        f"距MA60 `{metrics.get('distance_ma60_pct', 0):+.1f}%` · "
+        f"标准化偏离 `{metrics.get('deviation_z', 0):+.2f}`",
+        "- 回撤确认："
+        f"当前回撤 `{metrics.get('drawdown_pct', 0):.1f}%` · {stabilized} · "
+        f"RSI `{metrics.get('rsi_14', 0):.0f}`",
+    ]
+
+
+def _format_evidence(event: dict) -> list[str]:
     lines: list[str] = []
-    detail_url, f10_url = _fund_links(r["code"])
+    for item in event.get("evidence", [])[:3]:
+        if item.get("type") != "news" or not item.get("title"):
+            continue
+        title = str(item["title"]).replace("[", "").replace("]", "")
+        source = item.get("source") or "来源未标注"
+        url = item.get("url")
+        lines.append(f"- [{title}]({url}) · {source}" if url else f"- {title} · {source}")
+    return lines
 
-    # 标题:基金名 → 天天基金详情页
-    lines.append(f"### {rec_emoji} [{r['name']}]({detail_url})")
-    lines.append(f"`{r['code']}` · {tag} · [F10 资料]({f10_url})")
-    lines.append("")
 
-    # 顶部一行:综合分 + 三维子分
-    lines.append(
-        f"**综合 `{r['total_score']:.0f}/100`** · {rec_label}　　"
-        f"📐 技术 `{tech['score']:.0f}`　"
-        f"💰 估值 `{val['score']:.0f}`　"
-        f"📰 事件 `{ev['score']:.0f}`"
+def _format_result(result: dict) -> str:
+    detail_url, f10_url = _fund_links(result["code"])
+    quality = result["quality"]
+    quality_label, quality_icon = QUALITY_INFO.get(
+        quality.get("status"), ("状态未知", "⚪")
     )
-    lines.append("")
+    lines = [
+        f"### [{result['name']}]({detail_url})",
+        f"`{result['code']}` · {TYPE_TAG.get(result.get('type', ''), '')} · [F10 资料]({f10_url})",
+        "",
+        f"> {_combination_summary(result)}",
+        "",
+        f"**长期持有条件** {_score_text(result['long_term'])}",
+        *_long_term_lines(result["long_term"]),
+        "",
+        f"**当前投入时机** {_score_text(result['timing'])}",
+        *_timing_lines(result["timing"]),
+        "",
+        f"{quality_icon} **数据可信度：{quality_label}** · 版本 `{result['scoring_version']}`",
+    ]
 
-    # 关键指标
-    lines.append("**📊 技术指标**")
-    lines.append(
-        f"- 近 1 年分位 `{tech['quantile_1y']*100:.0f}%`"
-        f" · 回撤 `{tech['drawdown_pct']:.1f}%`"
-    )
-    lines.append(
-        f"- 距 MA60 `{tech['ma60_dist_pct']:+.1f}%`"
-        f" · RSI `{tech['rsi_14']:.0f}`"
-    )
-    lines.append("")
+    inputs = quality.get("inputs", {})
+    if inputs:
+        lines.extend(["", "**数据状态**"])
+        for name, item in inputs.items():
+            label = INPUT_LABELS.get(name, name)
+            status = STATUS_LABELS.get(item.get("status"), item.get("status", "未知"))
+            data_date = str(item.get("date") or "未知")[:10]
+            lines.append(f"- {label}：{status} · `{data_date}`")
 
-    # 市场状态(结构化事件)
-    if r.get("market_events"):
-        lines.append("**🌍 市场状态**")
-        for ev_line in r["market_events"].split("\n"):
-            if ev_line.strip():
-                lines.append(f"- {ev_line.strip()}")
-        lines.append("")
-
-    # AI 评语(事件分理由)
-    if ev.get("reason") and ev["reason"] not in ("无可用事件,中性", "无相关新闻,中性"):
-        lines.append("**💡 AI 评语**")
-        lines.append(f"> {ev['reason']}")
-        news_cnt = r.get("related_news_count", 0)
-        if news_cnt:
-            lines.append(f"> 关联新闻 {news_cnt} 条")
-        lines.append("")
-
-    # 风险提示
-    risks: list[str] = []
-    if ev.get("risks"):
-        risks.extend(ev["risks"])
-    if not tech.get("trend_filter_passed", True):
-        risks.append("短期趋势仍下行(反转过滤打折)")
-    if risks:
-        lines.append("**⚠️ 风险**")
-        for risk in risks:
-            lines.append(f"- {risk}")
-        lines.append("")
-
-    # 大白话判决(最后压轴)
-    verdict = get_verdict(r["recommendation"], r["code"])
-    lines.append(f"## 💬 {verdict}")
-    lines.append("")
-
-    return "\n".join(lines).rstrip()
+    event = result.get("event")
+    if event:
+        lines.extend(["", f"**AI事件分析（不参与评分）** · `{event.get('status', 'unknown')}`"])
+        if event.get("model"):
+            lines.append(f"- 模型：`{event['model']}`")
+        if event.get("reason"):
+            lines.append(f"> {event['reason']}")
+        evidence = _format_evidence(event)
+        if evidence:
+            lines.extend(["**证据来源**", *evidence])
+        if event.get("risks"):
+            lines.extend(["**事件风险**", *(f"- {risk}" for risk in event["risks"])])
+    return "\n".join(lines)
 
 
 def render_daily_report(results: list[dict]) -> tuple[str, str]:
-    """返回 (title, markdown_body)
-    Server酱 会把 title 单独显示在顶部,所以正文不要重复 title。
-    """
     today = date.today()
     weekday = ["一", "二", "三", "四", "五", "六", "日"][today.weekday()]
-    title = f"📊 基金日报 · {today.strftime('%m-%d')}(周{weekday})"
-
+    title = f"📊 基金观察日报 · {today.strftime('%m-%d')}(周{weekday})"
     if not results:
-        return title, "⚠️ 今日无打分结果,请检查数据抓取和日志。"
+        return title, "⚠️ 今日无观察结果，请检查数据抓取和日志。"
 
     parts: list[str] = []
-
-    # 顶部 callout:今日最佳 + 全部基金一句话汇总
-    top = results[0]
-    top_emoji, top_label = REC_INFO.get(top["recommendation"], ("⚪", ""))
-    parts.append(f"> {top_emoji} **今日最佳信号**")
-    parts.append(f"> {top['name']}")
-    parts.append(f"> 综合 `{top['total_score']:.0f}/100` · {top_label}")
-    parts.append("")
-
-    # 多只基金时给一个速览表
     if len(results) > 1:
-        parts.append("**📋 全部基金速览**")
-        parts.append("")
-        parts.append("| # | 基金 | 综合 | 建议 |")
-        parts.append("| :-: | :-- | :-: | :-- |")
-        for i, r in enumerate(results, 1):
-            emoji, label = REC_INFO.get(r["recommendation"], ("⚪", ""))
-            short_name = r["name"] if len(r["name"]) <= 14 else r["name"][:14] + "…"
-            detail_url, _ = _fund_links(r["code"])
+        parts.extend(
+            [
+                "**全部基金速览**",
+                "",
+                "| 基金 | 长期持有条件 | 当前投入时机 | 数据状态 |",
+                "| :-- | :-- | :-- | :-- |",
+            ]
+        )
+        for result in results:
+            url, _ = _fund_links(result["code"])
+            quality_label, _ = QUALITY_INFO.get(result["quality"]["status"], ("未知", ""))
             parts.append(
-                f"| {i} | [{short_name}]({detail_url}) `{r['code']}` "
-                f"| `{r['total_score']:.0f}` | {emoji} {label} |"
+                f"| [{result['name']}]({url}) | {_score_text(result['long_term'])} | "
+                f"{_score_text(result['timing'])} | {quality_label} |"
             )
         parts.append("")
 
-    parts.append("---")
-    parts.append("")
-
-    # 每只基金详细块
-    for i, r in enumerate(results, 1):
-        parts.append(_fmt_fund_block(r, i))
-        parts.append("")
-        parts.append("---")
-        parts.append("")
-
-    # 页脚
-    parts.append("📝 *本报告仅供参考,不构成投资建议*")
-
+    for result in results:
+        parts.extend(["---", "", _format_result(result), ""])
+    parts.extend(
+        [
+            "---",
+            "",
+            "📝 *两项分数是规则化研究观察，不是收益预测或操作指令。请独立判断风险。*",
+        ]
+    )
     return title, "\n".join(parts)

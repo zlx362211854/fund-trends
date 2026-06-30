@@ -7,10 +7,12 @@ from __future__ import annotations
 from loguru import logger
 
 from src.config import Config
+from src.evaluation.outcomes import update_mature_outcomes
 from src.agents.tools import (
     tool_refresh_fund_data,
     tool_refresh_market_data,
     tool_refresh_news,
+    tool_refresh_valuation_data,
     tool_score_fund,
 )
 
@@ -18,7 +20,7 @@ from src.agents.tools import (
 def run_data_agent(cfg: Config) -> dict:
     """Data Agent:刷新所有数据"""
     logger.info("=== Data Agent ===")
-    out = {"funds": {}, "market": {}, "news": {}}
+    out = {"funds": {}, "market": {}, "valuation": {}, "news": {}}
 
     for fund in cfg.funds:
         try:
@@ -28,7 +30,12 @@ def run_data_agent(cfg: Config) -> dict:
             out["funds"][fund.code] = {"error": str(e)}
 
     out["market"] = tool_refresh_market_data(cfg)
-    out["news"] = tool_refresh_news(cfg)
+    out["valuation"] = tool_refresh_valuation_data(cfg)
+    try:
+        out["news"] = tool_refresh_news(cfg)
+    except Exception as exc:
+        logger.error(f"[data] 新闻抓取失败: {exc}")
+        out["news"] = {"error": str(exc)}
     return out
 
 
@@ -39,18 +46,30 @@ def run_analysis_agent(cfg: Config) -> list[dict]:
     for fund in cfg.funds:
         try:
             r = tool_score_fund(cfg, fund)
-            logger.success(
-                f"  {fund.name}({fund.code}): {r['total_score']} → {r['recommendation']}"
-            )
+            long_score = r["long_term"]["score"]
+            timing_score = r["timing"]["score"]
+            if long_score is None and timing_score is None:
+                logger.warning(
+                    f"  {fund.name}({fund.code}): 不可评分 → {r['quality']['issues']}"
+                )
+            else:
+                logger.success(
+                    f"  {fund.name}({fund.code}): 长期={long_score} "
+                    f"时机={timing_score} ({r['quality']['status']})"
+                )
             results.append(r)
         except Exception as e:
             logger.error(f"  打分失败 {fund.code}: {e}")
-    # 按总分降序
-    results.sort(key=lambda x: x["total_score"], reverse=True)
     return results
 
 
 def run_pipeline(cfg: Config) -> list[dict]:
     """Orchestrator:Data → Analysis"""
     run_data_agent(cfg)
-    return run_analysis_agent(cfg)
+    results = run_analysis_agent(cfg)
+    try:
+        updated = update_mature_outcomes(cfg)
+        logger.info(f"[outcome] 新增到期结果 {updated} 条")
+    except Exception as exc:
+        logger.error(f"[outcome] 结果评价失败,下次重试: {exc}")
+    return results

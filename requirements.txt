@@ -19,3 +19,6 @@ tenacity>=8.2.0
 
 # Logging
 loguru>=0.7.0
+
+# Tests
+pytest>=8.0.0

@@ -1,141 +1,166 @@
-# 基金趋势监控
+# 基金双周期观察工具
 
-每天 8:00 微信推送基金加仓建议,每周五 17:00 推送周报。基于 akshare + DeepSeek + Server酱,部署在 Vultr。
+面向个人研究的基金观察与验证工具。系统按工作日刷新基金、市场、指数估值和新闻数据，分别生成“长期持有条件分”和“当前投入时机分”，并持续评价历史记录相对基准的5/20/60日表现。
 
-## 功能
+两项分数都是规则化研究观察，不表示预期收益、上涨概率或操作指令。
 
-- **日报**:每个交易日 8:00 推送 5 只以内基金的加仓吸引力打分(0-100)
-- **周报**:每周五 17:00 推送本周打分趋势 + 关键事件复盘
-- **打分维度**:技术面 40%(分位/回撤/MA/RSI)+ 估值面 30%(分位 + 汇率因子)+ 事件面 30%(LLM 分析持仓相关新闻)
-- **基金类型**:国内主动 / 国内指数 / 纳指 QDII(场外)
+## 核心能力
 
-## 项目结构
+- **双周期评分**：长期条件和当前时机独立计算，不再混成含义不清的总分。
+- **真实指数估值**：QDII使用纳斯达克100前瞻PE及其近10年历史分位，不使用价格分位冒充估值。
+- **趋势友好**：稳定上涨和正常创新高不会被机械扣分；只有显著偏离自身趋势时才降低时机分。
+- **企稳确认**：深度回撤只有配合短期跌势减弱和MA20企稳才提高时机分。
+- **数据可信度**：分别显示净值、指数、汇率、估值、持仓、新闻和AI事件状态。
+- **事件审计**：保存LLM模型、分析状态、新闻标题、来源、时间和URL，但LLM不参与数字评分。
+- **前瞻评价**：记录满5/20/60个基金交易日后，分别评价两个评分维度的相对基准表现。
+- **版本隔离**：`observation-v1`历史保持不变，`observation-v2`不会与旧分数混算。
 
-```
-fund-trends/
-├── config.yaml.example     # 配置模板
-├── requirements.txt
-├── src/
-│   ├── config.py           # 配置加载
-│   ├── db.py               # SQLite schema
-│   ├── data/               # akshare 抓数据
-│   ├── scoring/            # 技术 / 估值 / 事件面打分
-│   ├── agents/             # Agent 编排(pipeline 或 openai-agents SDK)
-│   ├── report/             # 日报 / 周报模板
-│   └── push/               # Server酱
-├── scripts/
-│   ├── init_db.py          # 初始化 DB
-│   ├── backfill.py         # 首次回填历史净值
-│   ├── run_daily.py        # 日报入口
-│   └── run_weekly.py       # 周报入口
-└── data/fund_trends.db     # SQLite(gitignored)
-```
+## 分数含义
 
-## 快速开始(本地)
+### 长期持有条件分
+
+| 因子 | 权重 | 含义 |
+| --- | ---: | --- |
+| 真实指数估值 | 40% | 前瞻PE当前值及近10年历史分位 |
+| 长期趋势 | 30% | MA200斜率、近6个月和12个月趋势 |
+| 风险稳定性 | 20% | 近3年最大回撤、年化波动率 |
+| 跟踪质量 | 10% | 基金净值与人民币口径基准的一致程度 |
+
+真实估值是必要输入。估值缺失、超过7个自然日或历史少于60个样本时，长期分显示“暂不可评估”，不会退回净值或指数价格分位。
+
+当前版本为纳斯达克100 QDII接入前瞻PE。国内指数和主动基金在没有经过验证的真实估值或基本面输入前，长期分可能暂不可评估。
+
+### 当前投入时机分
+
+| 因子 | 权重 | 含义 |
+| --- | ---: | --- |
+| 趋势状态 | 30% | 价格相对MA200及MA200斜率 |
+| 趋势偏离度 | 30% | 相对MA60/MA200的波动率标准化距离 |
+| 回撤与企稳 | 25% | 当前回撤、MA20斜率、近5/20日变化 |
+| 短期温度 | 15% | RSI14及短期收益 |
+
+时机分至少需要约220条价格记录。稳定上升趋势不会因“一年高分位”扣分；突然大幅偏离趋势会降低分数；仍在加速下跌时不会仅因回撤较深获得高分。
+
+统一等级：
+
+- `80-100`：条件较强
+- `60-79`：条件偏强
+- `40-59`：条件中性
+- `20-39`：条件偏弱
+- `0-19`：条件较弱
+- 核心数据不足：暂不可评估
+
+## 估值数据与缓存
+
+纳斯达克100前瞻PE来自 [History of Market NDX Forward PE JSON](https://historyofmarket.com/api/ndx/forward-pe.json)，其页面标注前瞻PE为Bloomberg BEst月频数据。系统保存来源、指标、数值、数据日期、样本数和抓取时间。
+
+USD/CNY使用[欧洲央行官方日频参考汇率](https://data.ecb.europa.eu/help/api/data)：一次请求获取人民币/欧元和美元/欧元，再用两者相除得到美元兑人民币。该口径用于研究观察，不代表可成交报价。
+
+- 每个基准每天最多请求一次。
+- 多只QDII基金共享同一份估值缓存。
+- 刷新失败时可使用不超过7个自然日的最近缓存，并明确显示缓存日期。
+- 返回空数据、异常字段、非正数或非法日期时拒绝写入有效缓存。
+- 外部接口不可用不会阻断净值刷新和当前时机分计算。
+
+## 数据质量
+
+默认最大自然日时效：
+
+| 数据 | 最大时效 |
+| --- | ---: |
+| 基金净值 | 7天 |
+| 市场数据 | 7天 |
+| 指数估值 | 7天 |
+| 基金持仓 | 180天 |
+| 新闻刷新 | 3天 |
+
+日报不再笼统显示“市场未知”，而是逐项标记 `正常 / 缓存可用 / 过期 / 缺失 / 失败 / 样本不足`。一项分数不可评估不会阻止另一项分数展示。
+
+## 快速开始
+
+建议使用Python 3.11至3.13。
 
 ```bash
-# 1. 准备环境
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. 配置
 cp config.yaml.example config.yaml
-# 编辑 config.yaml:填基金代码、DeepSeek key、Server酱 key
+# 在 .env 中设置 DEEPSEEK_API_KEY 和 SERVERCHAN_KEY
 
-# 3. 初始化数据库 + 回填历史数据(首次,耗时 1-3 分钟)
 python scripts/init_db.py
 python scripts/backfill.py
-
-# 4. 手动跑一次日报(测试)
 python scripts/run_daily.py
 ```
 
-如果一切正常,你的微信会收到一份日报。
+数据库初始化包含幂等迁移，升级时不需要手工修改SQLite表结构。
 
-## 部署到 Vultr
+## 配置
+
+```yaml
+scoring:
+  version: observation-v2
+  long_term_weights:
+    valuation: 0.40
+    trend: 0.30
+    risk: 0.20
+    tracking: 0.10
+  timing_weights:
+    trend: 0.30
+    deviation: 0.30
+    stabilization: 0.25
+    temperature: 0.15
+  max_valuation_age_days: 7
+  min_valuation_samples: 60
+```
+
+每组权重必须合计为 `1.0`。修改公式或权重时必须更新评分版本，避免不同规则混入同一统计分组。
+
+## 结果评价
 
 ```bash
-# 在 Vultr 服务器上
-git clone <repo> ~/fund-trends
-cd ~/fund-trends
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp config.yaml.example config.yaml
-vim config.yaml                          # 填配置
-python scripts/init_db.py
-python scripts/backfill.py
+python scripts/run_backtest.py
 ```
 
-### 配 cron
+基准口径：
+
+- 国内主动和国内指数基金：沪深300。
+- QDII指数基金：纳斯达克100人民币收益，即指数变化与USD/CNY变化的乘积。
+
+周报按评分版本、评分维度、等级和期限展示样本数、平均/中位超额收益和跑赢比例。样本少于30条时只标记“证据不足”，不据此调整权重或宣称规则有效。
+
+## 常用命令
 
 ```bash
-crontab -e
-```
+# 运行测试
+python -m pytest -q
 
-加入以下两行(注意时区:Vultr 默认 UTC,北京时间 8:00 = UTC 00:00):
+# 源码编译检查
+python -m compileall -q src scripts
 
-```cron
-# 每个交易日早 8:00(北京时间)推日报
-0 0 * * 1-5  cd /root/fund-trends && /root/fund-trends/.venv/bin/python scripts/run_daily.py >> logs/cron.log 2>&1
-
-# 每周五 17:00(北京时间)推周报
-0 9 * * 5  cd /root/fund-trends && /root/fund-trends/.venv/bin/python scripts/run_weekly.py >> logs/cron.log 2>&1
-```
-
-如果服务器是本地时区(`timedatectl set-timezone Asia/Shanghai`):
-
-```cron
-0 8  * * 1-5  cd /root/fund-trends && .venv/bin/python scripts/run_daily.py >> logs/cron.log 2>&1
-0 17 * * 5    cd /root/fund-trends && .venv/bin/python scripts/run_weekly.py >> logs/cron.log 2>&1
-```
-
-## 切换到 openai-agents SDK 模式
-
-默认 `scripts/run_daily.py` 走直接调用(`src/agents/pipeline.py`),稳定可靠。
-
-如果想让 LLM 自主决策"先查哪个、要不要重试",改 `scripts/run_daily.py`:
-
-```python
-# 把
-from src.agents.pipeline import run_pipeline
-results = run_pipeline(cfg)
-# 改成
-from src.agents.sdk_agents import run_with_sdk
-results = run_with_sdk(cfg)
-```
-
-## 加新基金
-
-只改 `config.yaml`,在 `funds` 列表加一行,然后:
-
-```bash
-python scripts/backfill.py    # 回填新基金的历史数据
-```
-
-下次 cron 触发就会包含新基金。
-
-## 日志和调试
-
-- 应用日志:`logs/fund_trends.log`
-- cron 日志:`logs/cron.log`
-- 数据库:`data/fund_trends.db`(可用 SQLite 工具直接看)
-
-查最近一次打分:
-
-```bash
+# 查看最近双评分记录
 sqlite3 data/fund_trends.db \
-  "SELECT score_date, code, total_score, recommendation FROM daily_scores ORDER BY score_date DESC LIMIT 20"
+  "SELECT score_date, code, long_term_score, timing_score, quality_status, scoring_version FROM daily_scores ORDER BY score_date DESC LIMIT 20"
+
+# 查看v2到期结果
+sqlite3 data/fund_trends.db \
+  "SELECT code, signal_date, dimension, horizon_days, excess_return_pct, beat_benchmark FROM score_outcomes_v2 ORDER BY signal_date DESC"
 ```
 
-## 风险提示
+## 部署与资源
 
-本工具仅供个人参考,不构成投资建议。LLM 输出可能有误,所有决策请独立判断。
+```bash
+bash deploy/install.sh
+```
 
-## 后续路线图
+默认cron任务为工作日8:00生成日报、周五17:00生成周报。服务器为UTC时，部署脚本会换算为对应北京时间。
 
-- [ ] 持仓股 PE 加权(目前估值面用净值分位代理)
-- [ ] 财联社电报实时新闻
-- [ ] 信号准确率统计(运行 4 周后启用)
-- [ ] 量化回测模块
+实现只使用现有pandas、numpy和SQLite。约5只基金共享行情和估值数据，单只基金最多计算约3年序列，复杂度为 `O(n)`；每日新增开销主要是一条轻量估值HTTP请求和一次SQLite批量写入，不增加AI调用，适合1核1GB服务器。
+
+## 局限
+
+- 数据依赖AKShare及第三方公开接口，可能延迟、不可用或改变字段。
+- 第三方纳指估值数据并非交易所授权数据终端，系统会完整显示来源和日期。
+- 主动基金尚缺少可验证的持仓加权基本面模型，不能仅凭市场指数估值评价其长期条件。
+- LLM事件分析可能出错，因此只作为独立说明，不进入数字评分。
+- 工具不包含个人风险承受能力、资金期限、仓位和组合约束，不能作为面向他人的投资顾问系统。
