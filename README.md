@@ -157,6 +157,8 @@ bash deploy/install.sh
 
 实现只使用现有pandas、numpy和SQLite。约5只基金共享行情和估值数据，单只基金最多计算约3年序列，复杂度为 `O(n)`；每日新增开销主要是一条轻量估值HTTP请求和一次SQLite批量写入，不增加AI调用，适合1核1GB服务器。
 
+也可以不使用服务器，改用 GitHub Actions 免费定时运行。仓库已内置 `.github/workflows/fund-trends.yml`，配置方法见 [docs/github-actions-deploy.md](docs/github-actions-deploy.md)。
+
 ## 局限
 
 - 数据依赖AKShare及第三方公开接口，可能延迟、不可用或改变字段。

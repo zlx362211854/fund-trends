@@ -1,0 +1,141 @@
+name: Fund Trends
+
+on:
+  schedule:
+    # Beijing 08:00, Monday-Friday. GitHub cron uses UTC.
+    - cron: "0 0 * * 1-5"
+    # Beijing 17:00, Friday.
+    - cron: "0 9 * * 5"
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: "Run daily report, weekly report, or only backfill data"
+        required: true
+        default: daily
+        type: choice
+        options:
+          - daily
+          - weekly
+          - backfill
+      force_backfill:
+        description: "Refresh historical data before running"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: fund-trends
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: Run fund trends
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
+      IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
+      CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve run mode
+        id: mode
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "${{ github.event.schedule }}" = "0 9 * * 5" ]; then
+              report_type="weekly"
+            else
+              report_type="daily"
+            fi
+            force_backfill="false"
+          else
+            report_type="${{ inputs.report_type }}"
+            force_backfill="${{ inputs.force_backfill }}"
+          fi
+
+          echo "report_type=${report_type}" >> "$GITHUB_OUTPUT"
+          echo "force_backfill=${force_backfill}" >> "$GITHUB_OUTPUT"
+          echo "Resolved report_type=${report_type}, force_backfill=${force_backfill}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Prepare runtime directories
+        shell: bash
+        run: |
+          mkdir -p data/reports logs
+
+      - name: Restore runtime data
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/*.db
+            data/*.db-journal
+            data/reports
+            logs
+          key: fund-trends-runtime-${{ github.run_id }}
+          restore-keys: |
+            fund-trends-runtime-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write private config
+        shell: bash
+        run: |
+          if [ -z "${CONFIG_YAML}" ]; then
+            echo "::error::Missing repository secret CONFIG_YAML. Add your config.yaml content to GitHub Actions secrets."
+            exit 1
+          fi
+          printf '%s\n' "${CONFIG_YAML}" > config.yaml
+
+      - name: Initialize or backfill database
+        shell: bash
+        env:
+          REPORT_TYPE: ${{ steps.mode.outputs.report_type }}
+          FORCE_BACKFILL: ${{ steps.mode.outputs.force_backfill }}
+        run: |
+          if [ "${FORCE_BACKFILL}" = "true" ] || [ "${REPORT_TYPE}" = "backfill" ] || [ ! -s data/fund_trends.db ]; then
+            python scripts/backfill.py
+          else
+            python scripts/init_db.py
+          fi
+
+      - name: Run report
+        if: steps.mode.outputs.report_type != 'backfill'
+        shell: bash
+        env:
+          REPORT_TYPE: ${{ steps.mode.outputs.report_type }}
+        run: |
+          if [ "${REPORT_TYPE}" = "weekly" ]; then
+            python scripts/run_weekly.py
+          else
+            python scripts/run_daily.py
+          fi
+
+      - name: Upload runtime artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fund-trends-runtime-${{ github.run_id }}
+          path: |
+            data/fund_trends.db
+            data/reports
+            logs
+          if-no-files-found: ignore
+          retention-days: 14
