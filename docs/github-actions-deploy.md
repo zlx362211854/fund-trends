@@ -61,8 +61,8 @@ llm:
   model: "deepseek-v4-pro"
 
 schedule:
-  daily_time: "08:00"
-  weekly_time: "17:00"
+  daily_time: "08:17"
+  weekly_time: "17:23"
   weekly_day: "friday"
 
 database:
@@ -75,10 +75,10 @@ logging:
 
 ## 定时规则
 
-GitHub Actions 使用 UTC 时间。当前工作流已经换算好：
+GitHub Actions 使用 UTC 时间。当前工作流已经换算好，并刻意避开整点，降低 GitHub 定时任务高峰期延迟或丢触发的概率：
 
-- 北京时间工作日 `08:00`：运行 `scripts/run_daily.py`
-- 北京时间周五 `17:00`：运行 `scripts/run_weekly.py`
+- 北京时间工作日 `08:17`：运行 `scripts/run_daily.py`
+- 北京时间周五 `17:23`：运行 `scripts/run_weekly.py`
 
 对应文件是：
 

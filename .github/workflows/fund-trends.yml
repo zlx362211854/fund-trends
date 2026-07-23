@@ -2,10 +2,10 @@ name: Fund Trends
 
 on:
   schedule:
-    # Beijing 08:00, Monday-Friday. GitHub cron uses UTC.
-    - cron: "0 0 * * 1-5"
-    # Beijing 17:00, Friday.
-    - cron: "0 9 * * 5"
+    # Beijing 08:17, Monday-Friday. GitHub cron uses UTC.
+    - cron: "17 0 * * 1-5"
+    # Beijing 17:23, Friday.
+    - cron: "23 9 * * 5"
   workflow_dispatch:
     inputs:
       report_type:
@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            if [ "${{ github.event.schedule }}" = "0 9 * * 5" ]; then
+            if [ "${{ github.event.schedule }}" = "23 9 * * 5" ]; then
               report_type="weekly"
             else
               report_type="daily"
