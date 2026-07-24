@@ -2,10 +2,14 @@ name: Fund Trends
 
 on:
   schedule:
-    # Beijing 08:17, Monday-Friday. GitHub cron uses UTC.
-    - cron: "17 0 * * 1-5"
-    # Beijing 17:23, Friday.
-    - cron: "23 9 * * 5"
+    # Beijing 08:17 / 08:37 / 08:57 / 09:17, Monday-Friday.
+    # Multiple attempts reduce GitHub scheduled-event misses. The script
+    # skips once today's successful daily push already exists.
+    - cron: "17,37,57 0 * * 1-5"
+    - cron: "17 1 * * 1-5"
+    # Beijing Friday 17:23 / 17:43 / 18:03. Deduplicated by push_history.
+    - cron: "23,43 9 * * 5"
+    - cron: "3 10 * * 5"
   workflow_dispatch:
     inputs:
       report_type:
@@ -51,11 +55,14 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            if [ "${{ github.event.schedule }}" = "23 9 * * 5" ]; then
-              report_type="weekly"
-            else
-              report_type="daily"
-            fi
+            case "${{ github.event.schedule }}" in
+              "23,43 9 * * 5"|"3 10 * * 5")
+                report_type="weekly"
+                ;;
+              *)
+                report_type="daily"
+                ;;
+            esac
             force_backfill="false"
           else
             report_type="${{ inputs.report_type }}"
@@ -122,7 +129,9 @@ jobs:
         env:
           REPORT_TYPE: ${{ steps.mode.outputs.report_type }}
         run: |
-          if [ "${REPORT_TYPE}" = "weekly" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python scripts/run_report_once.py "${REPORT_TYPE}"
+          elif [ "${REPORT_TYPE}" = "weekly" ]; then
             python scripts/run_weekly.py
           else
             python scripts/run_daily.py
